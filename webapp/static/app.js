@@ -73,6 +73,7 @@ let studioAutoReviewSceneIds = [];
 let studioAutoReviewSubmitting = false;
 let studioExports = [];
 let studioRenderJob = null;
+let studioOutputProfiles = {};
 let studioRenderTimer = null;
 let studioAutoWorkflow = false;
 let studioAutoStoryWorkflow = false;
@@ -641,6 +642,13 @@ function studioRenderSettings() {
   };
 }
 
+function updateStudioOutputProfile() {
+  const profile = studioOutputProfiles[$('#renderAspectRatio').value];
+  if (!profile) throw new Error('Unsupported output format');
+  $('#renderResolution').value =
+    `${profile.width} × ${profile.height} · ${profile.label}`;
+}
+
 async function saveStudioQualitySettings() {
   if (!studioProject) return;
   const projectId = studioProject.id;
@@ -651,12 +659,15 @@ async function saveStudioQualitySettings() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        aspect_ratio: $('#renderAspectRatio').value,
         image_motion: $('#imageMotion').value === 'true',
         transition: $('#sceneTransition').value,
         export_preset: $('#exportPreset').value,
       }),
     });
-    if (studioProject?.id === projectId) status.textContent = 'Quality options saved to this project.';
+    if (studioProject?.id === projectId) {
+      status.textContent = 'Output format and quality options saved to this project.';
+    }
   } catch (e) {
     if (studioProject?.id === projectId) {
       status.textContent = `Could not save quality options: ${e.message}`;
@@ -926,6 +937,7 @@ async function loadStudioProject(projectId) {
   }
   if (!projectId) {
     studioProject = null;
+    studioOutputProfiles = {};
     studioMedia = [];
     studioScenes = [];
     studioSuggestions = {};
@@ -954,6 +966,7 @@ async function loadStudioProject(projectId) {
   try {
     const project = await api(`/studio/projects/${projectId}`);
     studioProject = project;
+    studioOutputProfiles = project.output_profiles || {};
     studioMedia = project.media.map(item => ({
       description: '',
       keywords: [],
@@ -1005,7 +1018,11 @@ async function loadStudioProject(projectId) {
     $('#sceneTransition').value = qualitySettings.transition || 'hard_cut';
     $('#exportPreset').value = qualitySettings.export_preset ||
       project.render_defaults.export_preset || 'legacy';
-    $('#qualitySettingsStatus').textContent = 'Quality options saved to this project.';
+    $('#renderAspectRatio').value = qualitySettings.aspect_ratio ||
+      project.render_defaults.aspect_ratio || project.aspect_ratio || '9:16';
+    updateStudioOutputProfile();
+    $('#qualitySettingsStatus').textContent =
+      'Output format and quality options saved to this project.';
     updateStudioAudioControls();
     studioRenderJob = null;
     studioAutoWorkflow = false;
@@ -1277,6 +1294,10 @@ $('#useUploadOrderFallback').addEventListener('change', scheduleStudioAutoStoryS
 $('#adaptivePacing').addEventListener('change', scheduleStudioAutoStorySave);
 $('#storyScript').addEventListener('input', updateStudioStoryEstimate);
 $('#renderSceneSeconds').addEventListener('input', updateStudioStoryEstimate);
+$('#renderAspectRatio').addEventListener('change', () => {
+  updateStudioOutputProfile();
+  saveStudioQualitySettings();
+});
 ['imageMotion', 'sceneTransition', 'exportPreset'].forEach(id =>
   $(`#${id}`).addEventListener('change', saveStudioQualitySettings));
 $('#studioVoiceoverEnabled').addEventListener('change', () => {

@@ -4,8 +4,8 @@ A complete, self-hosted system that **generates and posts 1–3 faceless AI vide
 to **YouTube Shorts, Instagram Reels, Facebook Reels, and TikTok** — fully on autopilot.
 
 It runs a daily pipeline: **trend/idea research → script → AI voiceover → visuals/B-roll →
-word-by-word captions → 9:16 video assembly → thumbnail → SEO metadata → multi-platform
-publish → analytics feedback loop.**
+word-by-word captions → profile-aware video assembly (9:16 default or 16:9 landscape) →
+thumbnail → SEO metadata → multi-platform publish → analytics feedback loop.**
 
 ```
  ┌───────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐
@@ -19,7 +19,7 @@ publish → analytics feedback loop.**
  ┌───────────┐   ┌──────────┐   ┌───────────────────────────┐   ┌───────────┐
  │ ASSEMBLE  │──▶│ METADATA │──▶│  PUBLISH                  │──▶│ ANALYTICS │
  │ ffmpeg    │   │ title/   │   │  YouTube · TikTok ·       │   │ pull KPIs │
- │ 9:16 1080 │   │ desc/tags│   │  IG/FB Reels (Ayrshare)   │   │ feedback  │
+ │ 9:16/16:9  │   │ desc/tags│   │  IG/FB Reels (Ayrshare)   │   │ feedback  │
  └───────────┘   └──────────┘   └───────────────────────────┘   └───────────┘
 ```
 
@@ -260,8 +260,11 @@ The default **Studio** view lets you create local projects, upload and organize 
 PNG, WEBP, and MP4 media (up to 200 MB per file), preview clips, and play/download
 completed MP4s already in `output/`. Uploads are stored under the matching project
 in `output/studio_projects/`. **Generate Video** assembles the selected project's
-clips in saved order using the existing local FFmpeg segment normalizer at 1080×1920;
-no API keys, voiceover, or external services are used. Project renders are silent:
+clips in saved order using the local FFmpeg segment normalizer. Choose Vertical 9:16
+(1080×1920, the default for new and existing projects) or Landscape 16:9 (1920×1080)
+in the shared Output Format selector; the choice is saved per project for Manual and
+Auto workflows. No API keys, voiceover, or external services are used by a silent
+project render:
 audio from uploaded MP4 clips is removed, while the uploaded source files remain
 unchanged. Completed renders are stored under that project's `exports/` directory.
 The per-project quality controls retain the existing subtle still-image motion by
@@ -325,9 +328,10 @@ adjusted scene timing.
 
 Enable Captions for readable, white, outlined scene-level subtitles burned into the video.
 Choose small, medium, or large text and a lower safe-area or middle position. The lower
-position places the text about 270 pixels above the bottom at 1080×1920, scaled for other
-vertical resolutions. Medium captions use a restrained 60-pixel font at 1080×1920 and a
-9% horizontal margin on each side. Captions wrap to at most two lines; longer scene text is shown in
+position places the text about 270 pixels above the bottom at 1080×1920 and scales with
+the selected profile's height. Font size and wrapping also scale to the selected profile;
+captions keep a 9% horizontal margin on each side. Captions wrap to at most two lines;
+longer scene text is shown in
 successive two-line cards over that scene's caption interval. This is scene-level pacing,
 not word-level synchronization. When voiceover is enabled, captions follow each generated
 narration's measured scene timing; without voiceover, they cover the configured scene
@@ -495,7 +499,8 @@ src/           the 9-stage pipeline (one module per stage)
   ├── voiceover.py      stage 3 — TTS narration
   ├── visuals.py        stage 4 — stock/AI B-roll
   ├── captions.py       stage 5 — word-level ASS captions
-  ├── assemble.py       stage 6 — ffmpeg 9:16 render
+  ├── assemble.py       stage 6 — profile-aware ffmpeg render
+  ├── output_profiles.py shared 9:16 and 16:9 output dimensions
   ├── metadata.py       stage 7 — titles/desc/hashtags
   ├── publish.py        stage 8 — multi-platform post
   ├── analytics.py      stage 9 — KPI feedback loop

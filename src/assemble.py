@@ -1,6 +1,6 @@
-"""Stage 6 — composite everything into a clean, cinematic 9:16 master with ffmpeg.
+"""Stage 6 — composite everything into a clean, cinematic master with ffmpeg.
 
-clips → normalized 1080x1920 segments with alternating Ken Burns motion → concat
+clips → normalized profile-sized segments with alternating Ken Burns motion → concat
 → + mastered voiceover + ducked music → color grade + vignette → burn animated captions
 + hook title → progress bar → platform -14 LUFS. One watermark-free master for all platforms.
 """
@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 from .config import ROOT
+from .output_profiles import get_output_profile
 from .utils import ffprobe_duration, log, run_ffmpeg
 
 MUSIC_DIR = ROOT / "assets" / "music"
-W, H = 1080, 1920
 
 
 def _video_frame_count(path: Path) -> int:
@@ -46,12 +46,15 @@ def _export_encoding(export_preset: str) -> tuple[str, str, str, int]:
 
 def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int,
                       image_motion: bool = True,
-                      encoding: Optional[tuple[str, str, str, int]] = None) -> None:
-    """Scale+crop any image/video to a fixed-length 9:16 segment.
+                      encoding: Optional[tuple[str, str, str, int]] = None,
+                      aspect_ratio: str = "9:16") -> None:
+    """Scale+crop any image/video to an exact-length profile-sized segment.
 
     Still images optionally get a restrained zoom and pan. Every segment is bounded by an
     exact output frame count to keep its requested timeline duration.
     """
+    profile = get_output_profile(aspect_ratio)
+    width, height = profile.width, profile.height
     is_image = src.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
     frames = max(1, math.ceil(seconds * fps - 1e-9))
     if is_image:
@@ -60,16 +63,16 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
             zoom = "1+0.045*on/{d}" if idx % 2 == 0 else "1.045-0.045*on/{d}"
             pan = "24*on/{d}" if idx % 2 == 0 else "-24*on/{d}"
             vf = (
-                f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase,"
-                f"crop={W*2}:{H*2},"
+                f"scale={width*2}:{height*2}:force_original_aspect_ratio=increase,"
+                f"crop={width*2}:{height*2},"
                 f"zoompan=z='{zoom.format(d=denominator)}':"
                 f"x='iw/2-(iw/zoom/2)+{pan.format(d=denominator)}':"
-                f"y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={fps},setsar=1"
+                f"y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps},setsar=1"
             )
         else:
             vf = (
-                f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},setsar=1,fps={fps}"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},setsar=1,fps={fps}"
             )
         args = [
             "-loop", "1", "-framerate", str(fps), "-i", str(src),
@@ -77,10 +80,10 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
             "-an", str(dest),
         ]
     else:
-        # real footage already moves; just fit it cleanly to 9:16
+        # Real footage already moves; fill the selected profile without distortion.
         vf = (
-            f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},setsar=1,fps={fps}"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,fps={fps}"
         )
         args = [
             "-stream_loop", "-1", "-i", str(src), "-vf", vf,
@@ -99,6 +102,7 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
 def assemble(cfg: dict, clips: list, voice: Path, captions: Optional[Path],
              out_dir: Path) -> Path:
     vcfg = cfg["video"]
+    profile = get_output_profile(vcfg.get("aspect_ratio", "9:16"))
     fps = vcfg["fps"]
     cut = vcfg["cut_every_seconds"]
     voice_dur = ffprobe_duration(voice)
@@ -112,7 +116,9 @@ def assemble(cfg: dict, clips: list, voice: Path, captions: Optional[Path],
     for i in range(n_segments):
         src = clips[i % len(clips)]
         dest = seg_dir / f"seg{i:02d}.mp4"
-        _normalize_segment(src, dest, cut, fps, i)
+        _normalize_segment(
+            src, dest, cut, fps, i, aspect_ratio=profile.aspect_ratio,
+        )
         segments.append(dest)
 
     # Concat the silent video track.
@@ -175,7 +181,11 @@ def assemble(cfg: dict, clips: list, voice: Path, captions: Optional[Path],
         "-c:a", "aac", "-b:a", "256k", "-ar", "48000",
         "-t", f"{total}", "-movflags", "+faststart", str(final),
     ])
-    log(f"assemble: final.mp4 ({W}x{H}, {ffprobe_duration(final):.1f}s, graded)", "ok")
+    log(
+        f"assemble: final.mp4 ({profile.width}x{profile.height}, "
+        f"{ffprobe_duration(final):.1f}s, graded)",
+        "ok",
+    )
     return final
 
 
@@ -186,8 +196,10 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
                         captions_path: Optional[Path] = None,
                         image_motion: bool = True,
                         transition: str = "hard_cut",
-                        export_preset: str = "legacy") -> tuple[Path, float]:
+                        export_preset: str = "legacy",
+                        aspect_ratio: str = "9:16") -> tuple[Path, float]:
     """Assemble ordered project media into a silent video without pipeline services."""
+    profile = get_output_profile(aspect_ratio)
     if not clips:
         raise ValueError("At least one media clip is required")
     if (isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 120
@@ -243,6 +255,7 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
         _normalize_segment(
             src, segment, duration, fps, index, image_motion,
             segment_encoding if export_preset != "legacy" else None,
+            profile.aspect_ratio,
         )
         expected_frames = round(duration * fps)
         actual_frames = _video_frame_count(segment)

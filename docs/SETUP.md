@@ -100,7 +100,7 @@ crontab -e
 ✓ voiceover    → voice.mp3 (28s)
 ✓ visuals      → 12 clips downloaded
 ✓ captions     → captions.ass (word-level)
-✓ assemble     → final.mp4 (1080x1920, 30fps)
+✓ assemble     → final.mp4 (configured output profile, 30fps)
 ✓ metadata     → 3 title variants + tags
 ✓ publish      → [dry-run] would post to youtube, tiktok, instagram, facebook
 ```

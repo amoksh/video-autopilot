@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from src.assemble import _normalize_segment, assemble_media_only
 from src.captions import build_scene_captions
+from src.output_profiles import get_output_profile
 from src.utils import ffprobe_duration, run_ffmpeg as run_ffmpeg_command
 from webapp import server
 
@@ -60,6 +61,42 @@ def _make_mp4(path: Path, color: str) -> None:
     )
 
 
+def _make_sized_jpg(path: Path, color: str, size: str) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c={color}:s={size}",
+            "-frames:v", "1", "-q:v", "2", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
+def _make_sized_mp4(path: Path, color: str, size: str) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c={color}:s={size}:r=12:d=1",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
+def _make_split_mp4(path: Path) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i",
+            "color=c=black:s=160x90:r=12:d=1,"
+            "drawbox=x=0:y=0:w=80:h=90:color=red:t=fill,"
+            "drawbox=x=80:y=0:w=80:h=90:color=blue:t=fill",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
 class StoryTimelineIntegrationTest(unittest.TestCase):
     def test_export_metrics_reject_incompatible_video_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -98,6 +135,22 @@ class StoryTimelineIntegrationTest(unittest.TestCase):
                                 expected_audio=False, fps=30,
                                 last_caption_end=None,
                             )
+            landscape_video = {**valid_video, "width": 1920, "height": 1080}
+            probe = subprocess.CompletedProcess(
+                args=["ffprobe"],
+                returncode=0,
+                stdout=json.dumps({
+                    "streams": [landscape_video],
+                    "format": {"duration": "2"},
+                }),
+                stderr="",
+            )
+            with patch("webapp.server.subprocess.run", return_value=probe):
+                metrics = server._studio_export_metrics(
+                    path, expected_duration=2, expected_audio=False,
+                    fps=30, last_caption_end=None, aspect_ratio="16:9",
+                )
+            self.assertEqual((metrics["width"], metrics["height"]), (1920, 1080))
 
     def test_two_second_still_segments_have_exact_48_frames(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -135,6 +188,230 @@ class StoryTimelineIntegrationTest(unittest.TestCase):
             fractional_stream = json.loads(fractional_probe.stdout)["streams"][0]
             self.assertEqual(fractional_stream["nb_read_frames"], "27")
             self.assertAlmostEqual(float(fractional_stream["duration"]), 27 / 24)
+
+    def test_mixed_media_fills_both_profiles_with_captions_and_aac(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            portrait_image = directory / "portrait.jpg"
+            landscape_image = directory / "landscape.jpg"
+            portrait_video = directory / "portrait.mp4"
+            landscape_video = directory / "landscape.mp4"
+            rotated_video = directory / "rotated-landscape.mp4"
+            _make_sized_jpg(portrait_image, "red", "90x160")
+            _make_sized_jpg(landscape_image, "blue", "160x90")
+            _make_sized_mp4(portrait_video, "green", "90x160")
+            _make_sized_mp4(landscape_video, "yellow", "160x90")
+            rotated_base = directory / "rotated-base.mp4"
+            _make_sized_mp4(rotated_base, "cyan", "160x90")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-display_rotation", "90", "-i", str(rotated_base),
+                    "-c", "copy", str(rotated_video),
+                ],
+                check=True, capture_output=True,
+            )
+            rotated_probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries",
+                    "stream_side_data=rotation", "-of", "json",
+                    str(rotated_video),
+                ],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertEqual(
+                json.loads(rotated_probe.stdout)["streams"][0]["side_data_list"][0]["rotation"],
+                90,
+            )
+            clips = [
+                portrait_image, landscape_image, portrait_video,
+                landscape_video, rotated_video,
+            ]
+            original_bytes = [clip.read_bytes() for clip in clips]
+            audio = directory / "fixture.wav"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2.5",
+                    "-c:a", "pcm_s16le", str(audio),
+                ],
+                check=True, capture_output=True,
+            )
+            expected_dominant_channels = [0, 2, 1, 0, 1]
+
+            for aspect_ratio in ("9:16", "16:9"):
+                with self.subTest(aspect_ratio=aspect_ratio):
+                    profile = get_output_profile(aspect_ratio)
+                    out_dir = directory / aspect_ratio.replace(":", "-")
+                    out_dir.mkdir()
+                    captions = build_scene_captions(
+                        [{"text": "Both formats keep captions inside the safe area."}],
+                        [{
+                            "start": 0.0, "end": 2.5,
+                            "caption_end": 2.5,
+                        }],
+                        out_dir / "captions.ass",
+                        profile.width, profile.height,
+                    )
+                    output, duration = assemble_media_only(
+                        clips, out_dir, 12, 0.5,
+                        scene_durations=[0.5] * len(clips),
+                        audio_path=audio,
+                        captions_path=captions,
+                        image_motion=False,
+                        export_preset="balanced",
+                        aspect_ratio=aspect_ratio,
+                    )
+                    self.assertAlmostEqual(duration, 2.5, delta=1 / 12)
+                    probe = subprocess.run(
+                        [
+                            "ffprobe", "-v", "error", "-count_frames",
+                            "-show_entries",
+                            "stream=codec_type,codec_name,width,height,pix_fmt,nb_read_frames",
+                            "-of", "json", str(output),
+                        ],
+                        check=True, capture_output=True, text=True,
+                    )
+                    streams = json.loads(probe.stdout)["streams"]
+                    video = next(item for item in streams if item["codec_type"] == "video")
+                    audio_stream = next(item for item in streams if item["codec_type"] == "audio")
+                    self.assertEqual(video["codec_name"], "h264")
+                    self.assertEqual(video["pix_fmt"], "yuv420p")
+                    self.assertEqual(
+                        (video["width"], video["height"]),
+                        (profile.width, profile.height),
+                    )
+                    self.assertEqual(video["nb_read_frames"], "30")
+                    self.assertEqual(audio_stream["codec_name"], "aac")
+
+                    for index, expected_channel in enumerate(expected_dominant_channels):
+                        frame = subprocess.run(
+                            [
+                                "ffmpeg", "-v", "error", "-ss",
+                                str(index * 0.5 + 0.2), "-i", str(output),
+                                "-frames:v", "1", "-vf", "format=rgb24",
+                                "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                            ],
+                            check=True, capture_output=True,
+                        ).stdout
+                        self.assertEqual(len(frame), profile.width * profile.height * 3)
+
+                        def pixel(x: int, y: int) -> tuple[int, int, int]:
+                            offset = (y * profile.width + x) * 3
+                            return tuple(frame[offset:offset + 3])
+
+                        center = pixel(profile.width // 2, profile.height // 2)
+                        self.assertEqual(max(range(3), key=center.__getitem__),
+                                         expected_channel)
+                        for x, y in (
+                            (0, 0), (profile.width - 1, 0),
+                            (0, profile.height - 1),
+                            (profile.width - 1, profile.height - 1),
+                        ):
+                            self.assertGreater(sum(pixel(x, y)), 40)
+
+                    gray_frame = subprocess.run(
+                        [
+                            "ffmpeg", "-v", "error", "-ss", "0.2", "-i",
+                            str(output), "-frames:v", "1", "-vf", "format=gray",
+                            "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
+                        ],
+                        check=True, capture_output=True,
+                    ).stdout
+                    bright_positions = [
+                        (index % profile.width, index // profile.width)
+                        for index, value in enumerate(gray_frame) if value > 200
+                    ]
+                    self.assertGreater(len(bright_positions), 20)
+                    self.assertGreaterEqual(
+                        min(x for x, _ in bright_positions),
+                        round(profile.width * 0.08),
+                    )
+                    self.assertLessEqual(
+                        max(x for x, _ in bright_positions),
+                        round(profile.width * 0.92),
+                    )
+                    self.assertGreaterEqual(
+                        min(y for _, y in bright_positions),
+                        round(profile.height * 0.5),
+                    )
+                    self.assertLessEqual(
+                        max(y for _, y in bright_positions),
+                        round(profile.height * 0.9),
+                    )
+
+                    silent_dir = out_dir / "silent"
+                    silent_dir.mkdir()
+                    silent_output, silent_duration = assemble_media_only(
+                        clips[:2], silent_dir, 12, 0.5,
+                        scene_durations=[0.5, 0.5],
+                        image_motion=False,
+                        export_preset="balanced",
+                        aspect_ratio=aspect_ratio,
+                    )
+                    self.assertAlmostEqual(silent_duration, 1.0, delta=1 / 12)
+                    silent_probe = subprocess.run(
+                        [
+                            "ffprobe", "-v", "error", "-count_frames",
+                            "-show_entries",
+                            "stream=codec_type,codec_name,width,height,nb_read_frames",
+                            "-of", "json", str(silent_output),
+                        ],
+                        check=True, capture_output=True, text=True,
+                    )
+                    silent_streams = json.loads(silent_probe.stdout)["streams"]
+                    self.assertEqual(len(silent_streams), 1)
+                    self.assertEqual(silent_streams[0]["codec_type"], "video")
+                    self.assertEqual(silent_streams[0]["codec_name"], "h264")
+                    self.assertEqual(
+                        (silent_streams[0]["width"], silent_streams[0]["height"]),
+                        (profile.width, profile.height),
+                    )
+                    self.assertEqual(silent_streams[0]["nb_read_frames"], "12")
+            self.assertEqual([clip.read_bytes() for clip in clips], original_bytes)
+
+    def test_video_display_rotation_is_applied_before_profile_framing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "split-landscape.mp4"
+            rotated = directory / "split-rotated.mp4"
+            output = directory / "normalized.mp4"
+            _make_split_mp4(source)
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-display_rotation", "90", "-i", str(source),
+                    "-c", "copy", str(rotated),
+                ],
+                check=True, capture_output=True,
+            )
+            _normalize_segment(
+                rotated, output, 1, 12, 0, image_motion=False,
+                aspect_ratio="9:16",
+            )
+            frame = subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-ss", "0.25", "-i",
+                    str(output), "-frames:v", "1", "-vf", "format=rgb24",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                ],
+                check=True, capture_output=True,
+            ).stdout
+            profile = get_output_profile("9:16")
+
+            def dominant_at(y_ratio: float) -> int:
+                offset = (
+                    (round(profile.height * y_ratio) * profile.width
+                     + profile.width // 2) * 3
+                )
+                rgb = tuple(frame[offset:offset + 3])
+                return max(range(3), key=rgb.__getitem__)
+
+            self.assertEqual(len(frame), profile.width * profile.height * 3)
+            self.assertEqual(
+                {dominant_at(0.25), dominant_at(0.75)},
+                {0, 2},
+            )
 
     def test_mixed_jpg_mp4_hard_cut_render_preserves_order_duration_and_sources(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -568,7 +845,9 @@ class StoryTimelineIntegrationTest(unittest.TestCase):
                 self.assertEqual(saved_manifest["custom_metadata"], {"keep": True})
 
                 job_data = server.render_studio_project(
-                    project_id, server.StudioRenderReq(fps=12)
+                    project_id, server.StudioRenderReq(
+                        fps=12, aspect_ratio="16:9",
+                    )
                 )
                 job = server.STUDIO_RENDER_JOBS[job_data["id"]]
                 deadline = time.monotonic() + 120
@@ -580,6 +859,15 @@ class StoryTimelineIntegrationTest(unittest.TestCase):
 
                 export_path = project_dir / "exports" / export_id / "final.mp4"
                 self.assertAlmostEqual(ffprobe_duration(export_path), 4.5, delta=1 / 12)
+                dimensions = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height",
+                        "-of", "csv=s=x:p=0", str(export_path),
+                    ],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+                self.assertEqual(dimensions, "1920x1080")
 
                 def sample_rgb(seconds: float) -> tuple[int, int, int]:
                     import subprocess

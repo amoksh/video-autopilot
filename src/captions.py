@@ -15,6 +15,7 @@ import unicodedata
 from pathlib import Path
 from typing import Literal, Optional
 
+from .output_profiles import get_output_profile
 from .utils import log
 
 # Strip markdown / stray formatting an LLM might leave in on-screen text.
@@ -327,7 +328,8 @@ def build_captions(cfg: dict, voice_path: Path, out_dir: Path,
 
     max_words = style.get("max_words_per_cue", 3)
     uppercase = style.get("uppercase", True)
-    res_x, res_y = cfg["video"]["width"], cfg["video"]["height"]
+    profile = get_output_profile(cfg["video"].get("aspect_ratio", "9:16"))
+    res_x, res_y = profile.width, profile.height
     fontname = style.get("fontname", "Montserrat")
     requested_font_size = int(style["font_size"])
     font_size_limit = max(1, round(min(res_x * 0.08, res_y * 0.055)))
@@ -340,6 +342,10 @@ def build_captions(cfg: dict, voice_path: Path, out_dir: Path,
     primary = style["primary_color"]
     highlight = style.get("highlight_color", "&H0000F2FF")
     outline_col = style.get("outline_color", "&H00000000")
+    safe_zone_padding = round(
+        cfg["video"].get("safe_zone_padding", 220) * res_y / 1920
+    )
+    hook_margin = round(300 * res_y / 1920)
 
     # Keep outline and margins inside a conservative 9% horizontal safe area.
     header = f"""[Script Info]
@@ -351,8 +357,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Base,{fontname},{font_size},{primary},{outline_col},&H96000000,1,{outline},{shadow},{align},{margin_x},{margin_x},{cfg['video']['safe_zone_padding']},1
-Style: Hook,{fontname},{int(font_size * 0.82)},{highlight},{outline_col},&H96000000,1,{outline},{shadow},8,{margin_x},{margin_x},300,1
+Style: Base,{fontname},{font_size},{primary},{outline_col},&H96000000,1,{outline},{shadow},{align},{margin_x},{margin_x},{safe_zone_padding},1
+Style: Hook,{fontname},{int(font_size * 0.82)},{highlight},{outline_col},&H96000000,1,{outline},{shadow},8,{margin_x},{margin_x},{hook_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

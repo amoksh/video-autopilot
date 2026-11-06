@@ -25,8 +25,7 @@ tts:
 visuals:
   provider: local             # pexels (free stock) | fal | replicate (AI images)
   clips_per_video: 12          # ~1 visual per 2–3s of a 25–35s video
-  orientation: portrait        # portrait b-roll for 9:16
-  ai_image_style: "cinematic, high detail, dramatic lighting, vertical 9:16"
+  ai_image_style: "cinematic, high detail, dramatic lighting"
 
 captions:
   enabled: true
@@ -46,8 +45,7 @@ captions:
     uppercase: true
 
 video:
-  width: 1080
-  height: 1920
+  aspect_ratio: "9:16"
   fps: 30
   target_seconds: 34           # Playbook §4 sweet spot; 21–45 range
   cut_every_seconds: 2.3       # visual change cadence (retention)

@@ -21,8 +21,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from src.assemble import H, W, assemble_media_only
+from src.assemble import assemble_media_only
 from src.captions import build_scene_captions
+from src.output_profiles import OUTPUT_PROFILES, OutputAspectRatio, get_output_profile
 from src.studio_matching import (
     arrange_scenes,
     auto_assign_confident_scenes,
@@ -189,13 +190,13 @@ class StudioAutoStoryInputReq(BaseModel):
 
 
 class StudioQualitySettings(BaseModel):
+    aspect_ratio: OutputAspectRatio = "9:16"
     image_motion: bool = True
     transition: Literal["hard_cut", "crossfade"] = "hard_cut"
     export_preset: Literal["legacy", "balanced", "high_quality"] = "legacy"
 
 
 class StudioRenderReq(StudioQualitySettings):
-    aspect_ratio: str = "9:16"
     fps: int = Field(default=30, ge=12, le=60)
     seconds_per_scene: float = Field(default=2.3, ge=0.5, le=30)
     adaptive_pacing: bool = False
@@ -242,6 +243,7 @@ class StudioRenderJob:
         self.scene_timings: list[dict] = []
 
     def as_dict(self) -> dict:
+        profile = get_output_profile(self.settings.aspect_ratio)
         return {
             "id": self.id,
             "project_id": self.project_id,
@@ -257,6 +259,9 @@ class StudioRenderJob:
             "video_bitrate": self.video_bitrate,
             "audio_bitrate": self.audio_bitrate,
             "export_preset": self.settings.export_preset,
+            "aspect_ratio": profile.aspect_ratio,
+            "width": profile.width,
+            "height": profile.height,
             "scene_timings": self.scene_timings,
         }
 
@@ -315,6 +320,18 @@ def _studio_adaptive_pacing(manifest: dict, req: StudioAutoStoryInputReq) -> boo
         return req.adaptive_pacing
     settings = manifest.get("auto_mode_settings", {})
     return bool(settings.get("adaptive_pacing", False)) if isinstance(settings, dict) else False
+
+
+def _studio_render_settings(
+    manifest: dict, settings: StudioRenderReq,
+) -> StudioRenderReq:
+    saved = StudioQualitySettings.model_validate(manifest.get("quality_settings", {}))
+    updates = {}
+    if "aspect_ratio" not in settings.model_fields_set:
+        updates["aspect_ratio"] = saved.aspect_ratio
+    if "export_preset" not in settings.model_fields_set:
+        updates["export_preset"] = saved.export_preset
+    return settings.model_copy(update=updates) if updates else settings
 
 
 def _studio_project_summary(manifest: dict) -> dict:
@@ -535,7 +552,9 @@ def _validate_scene_timeline(timings: list[dict], expected_duration: float,
 
 def _studio_export_metrics(video_path: Path, expected_duration: float,
                            expected_audio: bool, fps: int,
-                           last_caption_end: Optional[float]) -> dict:
+                           last_caption_end: Optional[float],
+                           aspect_ratio: str = "9:16") -> dict:
+    profile = get_output_profile(aspect_ratio)
     probe = subprocess.run(
         [
             "ffprobe", "-v", "error", "-show_entries",
@@ -558,10 +577,12 @@ def _studio_export_metrics(video_path: Path, expected_duration: float,
     )
     if not video or video.get("codec_name") != "h264":
         raise RuntimeError("Export is missing its browser-compatible H.264 video stream")
-    if (video.get("width") != W or video.get("height") != H
+    if (video.get("width") != profile.width
+            or video.get("height") != profile.height
             or video.get("pix_fmt") != "yuv420p"):
         raise RuntimeError(
-            "Export must use 1080x1920 yuv420p video for browser-compatible playback"
+            f"Export must use {profile.width}x{profile.height} yuv420p video "
+            "for browser-compatible playback"
         )
     try:
         frame_rate = float(Fraction(video.get("avg_frame_rate", "")))
@@ -611,6 +632,7 @@ def _render_studio_project(job: StudioRenderJob, clips: list[Path],
                            scene_durations: Optional[list[float]] = None,
                            scenes: Optional[list[dict]] = None) -> None:
     project_dir = _studio_project_dir(job.project_id)
+    profile = get_output_profile(job.settings.aspect_ratio)
     exports_dir = project_dir / "exports"
     staging_dir = exports_dir / f".staging-{job.id}"
     final_dir = exports_dir / job.id
@@ -669,7 +691,8 @@ def _render_studio_project(job: StudioRenderJob, clips: list[Path],
             job.scene_timings = timings
             if job.audio_settings.captions_enabled:
                 captions_path = build_scene_captions(
-                    scenes, timings, staging_dir / "captions.ass", W, H,
+                    scenes, timings, staging_dir / "captions.ass",
+                    profile.width, profile.height,
                     job.audio_settings.caption_size,
                     job.audio_settings.caption_position,
                 )
@@ -680,10 +703,12 @@ def _render_studio_project(job: StudioRenderJob, clips: list[Path],
             effective_durations, audio_path, captions_path,
             job.settings.image_motion, job.settings.transition,
             job.settings.export_preset,
+            aspect_ratio=profile.aspect_ratio,
         )
         metrics = _studio_export_metrics(
             output_path, duration, audio_path is not None, job.settings.fps,
             job.scene_timings[-1]["caption_end"] if job.scene_timings else None,
+            profile.aspect_ratio,
         )
         final_dir.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staging_dir, final_dir)
@@ -1064,20 +1089,31 @@ def studio_project(project_id: str):
     ):
         raise HTTPException(400, "Project story data is invalid")
     video_settings = _read_yaml("settings.yaml").get("video", {})
+    quality_settings = StudioQualitySettings.model_validate(
+        manifest.get("quality_settings", {})
+    )
+    profile = get_output_profile(quality_settings.aspect_ratio)
     return {
         **_studio_project_summary(manifest),
-        "width": W,
-        "height": H,
+        "output_profiles": {
+            key: {
+                "aspect_ratio": profile.aspect_ratio,
+                "width": profile.width,
+                "height": profile.height,
+                "label": profile.label,
+            }
+            for key, profile in OUTPUT_PROFILES.items()
+        },
+        "aspect_ratio": profile.aspect_ratio,
+        "width": profile.width,
+        "height": profile.height,
         "render_defaults": {
             "fps": video_settings.get("fps", 30),
             "seconds_per_scene": video_settings.get("cut_every_seconds", 2.3),
-            "export_preset": StudioQualitySettings.model_validate(
-                manifest.get("quality_settings", {})
-            ).export_preset,
+            "aspect_ratio": profile.aspect_ratio,
+            "export_preset": quality_settings.export_preset,
         },
-        "quality_settings": StudioQualitySettings.model_validate(
-            manifest.get("quality_settings", {})
-        ).model_dump(),
+        "quality_settings": quality_settings.model_dump(),
         "media": [
             _studio_media_public(project_id, item)
             for item in manifest.get("media", [])
@@ -1105,6 +1141,8 @@ def save_studio_quality_settings(project_id: str, req: StudioQualitySettings):
         manifest["quality_settings"] = req.model_dump()
         if "export_preset" not in req.model_fields_set:
             manifest["quality_settings"]["export_preset"] = current.export_preset
+        if "aspect_ratio" not in req.model_fields_set:
+            manifest["quality_settings"]["aspect_ratio"] = current.aspect_ratio
 
     manifest = _update_studio_manifest(project_id, save_quality)
     return {"quality_settings": manifest["quality_settings"]}
@@ -1216,8 +1254,9 @@ def create_studio_auto_story(project_id: str, req: StudioAutoStoryReq):
     manifest = _studio_manifest(project_id)
     if manifest.get("id") != project_id:
         raise HTTPException(404, "project not found")
-    if req.render_settings.aspect_ratio != "9:16":
-        raise HTTPException(400, "Only 9:16 output is currently supported")
+    req = req.model_copy(update={
+        "render_settings": _studio_render_settings(manifest, req.render_settings),
+    })
     brief = req.master_story_brief.strip()
     if not brief:
         raise HTTPException(400, "Enter a Master Story Brief before creating a video")
@@ -1366,8 +1405,7 @@ def auto_create_studio_video(project_id: str, req: StudioRenderReq):
     manifest = _studio_manifest(project_id)
     if manifest.get("id") != project_id:
         raise HTTPException(404, "project not found")
-    if req.aspect_ratio != "9:16":
-        raise HTTPException(400, "Only 9:16 output is currently supported")
+    req = _studio_render_settings(manifest, req)
     story_script = manifest.get("story_script", "")
     if not isinstance(story_script, str):
         raise HTTPException(400, "Project story script is invalid")
@@ -1427,8 +1465,9 @@ def resume_studio_auto_director(
     manifest = _studio_manifest(project_id)
     if manifest.get("id") != project_id:
         raise HTTPException(404, "project not found")
-    if req.render_settings.aspect_ratio != "9:16":
-        raise HTTPException(400, "Only 9:16 output is currently supported")
+    req = req.model_copy(update={
+        "render_settings": _studio_render_settings(manifest, req.render_settings),
+    })
     scenes = manifest.get("scenes", [])
     media = manifest.get("media", [])
     if (not isinstance(scenes, list) or not isinstance(media, list)
@@ -1710,13 +1749,8 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
     manifest = _studio_manifest(project_id)
     if manifest.get("id") != project_id:
         raise HTTPException(404, "project not found")
-    if "export_preset" not in req.model_fields_set:
-        saved_quality = StudioQualitySettings.model_validate(
-            manifest.get("quality_settings", {})
-        )
-        req = req.model_copy(update={"export_preset": saved_quality.export_preset})
-    if req.aspect_ratio != "9:16":
-        raise HTTPException(400, "Only 9:16 output is currently supported")
+    req = _studio_render_settings(manifest, req)
+    profile = get_output_profile(req.aspect_ratio)
     clips = _validated_project_media(project_id, manifest)
     if not clips:
         raise HTTPException(400, "Upload at least one clip or image before rendering")
@@ -1803,6 +1837,7 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
             project_id,
             lambda current: current.update(
                 quality_settings={
+                    "aspect_ratio": req.aspect_ratio,
                     "image_motion": req.image_motion,
                     "transition": req.transition,
                     "export_preset": req.export_preset,
@@ -1833,8 +1868,8 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
             raise HTTPException(500, "Could not start render worker") from error
     return {
         **job.as_dict(),
-        "width": W,
-        "height": H,
+        "width": profile.width,
+        "height": profile.height,
     }
 
 

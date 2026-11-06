@@ -134,6 +134,11 @@ class AutoStoryTest(unittest.TestCase):
         self.assertEqual(
             created.json()["quality_settings"]["export_preset"], "balanced",
         )
+        self.assertEqual(created.json()["aspect_ratio"], "9:16")
+        self.assertEqual(
+            (created.json()["width"], created.json()["height"]),
+            (1080, 1920),
+        )
         manifest = server._studio_manifest(self.project_id)
         manifest.pop("quality_settings", None)
         server._save_studio_manifest(self.project_id, manifest)
@@ -143,6 +148,7 @@ class AutoStoryTest(unittest.TestCase):
         self.assertEqual(
             legacy.json()["quality_settings"],
             {
+                "aspect_ratio": "9:16",
                 "image_motion": True,
                 "transition": "hard_cut",
                 "export_preset": "legacy",
@@ -152,6 +158,7 @@ class AutoStoryTest(unittest.TestCase):
         saved = self.client.put(
             f"/api/studio/projects/{self.project_id}/quality-settings",
             json={
+                "aspect_ratio": "16:9",
                 "image_motion": False,
                 "transition": "crossfade",
                 "export_preset": "high_quality",
@@ -162,10 +169,16 @@ class AutoStoryTest(unittest.TestCase):
         self.assertEqual(
             reloaded.json()["quality_settings"],
             {
+                "aspect_ratio": "16:9",
                 "image_motion": False,
                 "transition": "crossfade",
                 "export_preset": "high_quality",
             },
+        )
+        self.assertEqual(reloaded.json()["aspect_ratio"], "16:9")
+        self.assertEqual(
+            (reloaded.json()["width"], reloaded.json()["height"]),
+            (1920, 1080),
         )
         legacy_update = self.client.put(
             f"/api/studio/projects/{self.project_id}/quality-settings",
@@ -175,6 +188,75 @@ class AutoStoryTest(unittest.TestCase):
             legacy_update.json()["quality_settings"]["export_preset"],
             "high_quality",
         )
+        self.assertEqual(
+            legacy_update.json()["quality_settings"]["aspect_ratio"],
+            "16:9",
+        )
+
+    def test_manual_auto_director_and_auto_story_use_saved_output_profile(self):
+        self.upload_mixed_assets()
+        with patch.object(server.threading, "Thread") as worker:
+            worker.return_value.start.return_value = None
+            manual = self.client.post(
+                f"/api/studio/projects/{self.project_id}/render",
+                json={
+                    "aspect_ratio": "16:9",
+                    "fps": 12,
+                    "seconds_per_scene": 0.5,
+                    "export_preset": "balanced",
+                },
+            )
+            self.assertEqual(manual.status_code, 202, manual.text)
+            self.assertEqual(
+                (manual.json()["width"], manual.json()["height"]), (1920, 1080),
+            )
+            self.assertEqual(manual.json()["aspect_ratio"], "16:9")
+            server.STUDIO_RENDER_JOBS.pop(manual.json()["id"], None)
+
+            auto_director = self.client.post(
+                f"/api/studio/projects/{self.project_id}/auto-director/create",
+                json={
+                    "aspect_ratio": "16:9",
+                    "fps": 12,
+                    "seconds_per_scene": 0.5,
+                    "export_preset": "balanced",
+                },
+            )
+            self.assertEqual(auto_director.status_code, 202, auto_director.text)
+            self.assertEqual(auto_director.json()["status"], "rendering")
+            self.assertEqual(auto_director.json()["job"]["aspect_ratio"], "16:9")
+            self.assertEqual(
+                (auto_director.json()["job"]["width"],
+                 auto_director.json()["job"]["height"]),
+                (1920, 1080),
+            )
+            server.STUDIO_RENDER_JOBS.pop(auto_director.json()["job"]["id"], None)
+
+            auto_story = self.client.post(
+                f"/api/studio/projects/{self.project_id}/auto-story/create",
+                json=self.create_request(
+                    "1. Asset: 1\nNarration: A landscape scene.",
+                    render_settings={
+                        "aspect_ratio": "16:9",
+                        "fps": 12,
+                        "seconds_per_scene": 0.5,
+                        "export_preset": "balanced",
+                    },
+                ),
+            )
+            self.assertEqual(auto_story.status_code, 202, auto_story.text)
+            self.assertEqual(auto_story.json()["status"], "rendering")
+            self.assertEqual(auto_story.json()["job"]["aspect_ratio"], "16:9")
+            self.assertEqual(
+                (auto_story.json()["job"]["width"],
+                 auto_story.json()["job"]["height"]),
+                (1920, 1080),
+            )
+            self.assertEqual(
+                server._studio_manifest(self.project_id)["quality_settings"]["aspect_ratio"],
+                "16:9",
+            )
+            server.STUDIO_RENDER_JOBS.pop(auto_story.json()["job"]["id"], None)
 
     def test_adaptive_pacing_setting_persists_and_legacy_input_defaults_off(self):
         project = self.client.get(
@@ -580,6 +662,11 @@ Mood: Quiet."""
                 json=self.create_request(
                     _FOUR_SCENE_BRIEF, audio_settings=audio_settings,
                     adaptive_pacing=True,
+                    render_settings={
+                        "aspect_ratio": "16:9",
+                        "fps": 12,
+                        "seconds_per_scene": 0.5,
+                    },
                 ),
             )
             self.assertEqual(response.status_code, 202, response.text)
@@ -624,6 +711,7 @@ Mood: Quiet."""
             f"/api/studio/projects/{self.project_id}"
         ).json()
         self.assertEqual(project["master_story_brief"], _FOUR_SCENE_BRIEF)
+        self.assertEqual(project["aspect_ratio"], "16:9")
         self.assertEqual(project["audio_settings"], audio_settings)
         self.assertFalse(project["auto_mode_settings"]["use_upload_order_fallback"])
         self.assertTrue(project["auto_mode_settings"]["adaptive_pacing"])
@@ -651,7 +739,7 @@ Mood: Quiet."""
         info = json.loads(probe.stdout)
         video_stream = next(stream for stream in info["streams"]
                             if stream["codec_type"] == "video")
-        self.assertEqual((video_stream["width"], video_stream["height"]), (1080, 1920))
+        self.assertEqual((video_stream["width"], video_stream["height"]), (1920, 1080))
         self.assertEqual(video_stream["r_frame_rate"], "12/1")
         self.assertTrue(any(stream["codec_type"] == "audio"
                             for stream in info["streams"]))

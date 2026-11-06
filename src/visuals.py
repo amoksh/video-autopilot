@@ -1,4 +1,4 @@
-"""Stage 4 — gather one vertical visual per beat. Pexels stock (free) or AI images."""
+"""Stage 4 — gather profile-matched visuals per beat. Pexels stock or AI images."""
 from __future__ import annotations
 
 import math
@@ -8,6 +8,7 @@ from typing import Optional
 import requests
 
 from .config import env
+from .output_profiles import get_output_profile
 from .utils import log
 
 
@@ -67,11 +68,16 @@ def _pexels_video(query: str, dest: Path, cfg: dict, used_ids: Optional[set] = N
     key = env("PEXELS_API_KEY")
     if not key:
         raise SystemExit("PEXELS_API_KEY missing in .env")
+    profile = get_output_profile(cfg["video"].get("aspect_ratio", "9:16"))
+    orientation = "portrait" if profile.height > profile.width else "landscape"
     used_ids = used_ids if used_ids is not None else set()
     r = requests.get(
         "https://api.pexels.com/videos/search",
         headers={"Authorization": key},
-        params={"query": query, "orientation": "portrait", "per_page": 12, "size": "large"},
+        params={
+            "query": query, "orientation": orientation,
+            "per_page": 12, "size": "large",
+        },
         timeout=30,
     )
     r.raise_for_status()
@@ -84,13 +90,25 @@ def _pexels_video(query: str, dest: Path, cfg: dict, used_ids: Optional[set] = N
     video = fresh[0]
     used_ids.add(video.get("id"))
 
-    # Pick a crisp portrait file: tall enough for 1080x1920 but not absurdly large.
-    portrait = [f for f in video["video_files"]
-                if (f.get("height") or 0) >= (f.get("width") or 0)]
-    pool = portrait or video["video_files"]
+    # Prefer the selected profile's orientation and target resolution.
+    matching = [
+        file for file in video["video_files"]
+        if (
+            (file.get("height") or 0) >= (file.get("width") or 0)
+            if orientation == "portrait"
+            else (file.get("width") or 0) > (file.get("height") or 0)
+        )
+    ]
+    pool = matching or video["video_files"]
     files = sorted(
         pool,
-        key=lambda f: (abs((f.get("height") or 0) - 1920), -(f.get("width") or 0)),
+        key=lambda file: (
+            abs(
+                max(file.get("width") or 0, file.get("height") or 0)
+                - max(profile.width, profile.height)
+            ),
+            -min(file.get("width") or 0, file.get("height") or 0),
+        ),
     )
     url = files[0]["link"]
     out = dest.with_suffix(".mp4")
@@ -99,8 +117,10 @@ def _pexels_video(query: str, dest: Path, cfg: dict, used_ids: Optional[set] = N
 
 
 def _ai_image(prompt: str, dest: Path, cfg: dict, provider: str) -> Path:
+    profile = get_output_profile(cfg["video"].get("aspect_ratio", "9:16"))
+    orientation = "portrait" if profile.height > profile.width else "landscape"
     style = cfg["visuals"].get("ai_image_style", "")
-    full = f"{prompt}, {style}"
+    full = f"{prompt}, {style}, {orientation} {profile.aspect_ratio} composition"
     out = dest.with_suffix(".png")
     if provider == "fal":
         key = env("FAL_KEY")
@@ -109,7 +129,10 @@ def _ai_image(prompt: str, dest: Path, cfg: dict, provider: str) -> Path:
         r = requests.post(
             "https://fal.run/fal-ai/flux/schnell",
             headers={"Authorization": f"Key {key}", "Content-Type": "application/json"},
-            json={"prompt": full, "image_size": "portrait_16_9"},
+            json={
+                "prompt": full,
+                "image_size": f"{orientation}_16_9",
+            },
             timeout=120,
         )
         r.raise_for_status()
@@ -121,7 +144,7 @@ def _ai_image(prompt: str, dest: Path, cfg: dict, provider: str) -> Path:
         r = requests.post(
             "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
             headers={"Authorization": f"Bearer {key}", "Prefer": "wait"},
-            json={"input": {"prompt": full, "aspect_ratio": "9:16"}},
+            json={"input": {"prompt": full, "aspect_ratio": profile.aspect_ratio}},
             timeout=180,
         )
         r.raise_for_status()

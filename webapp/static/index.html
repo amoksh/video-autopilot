@@ -197,11 +197,14 @@
               <p class="studio-audio-note">Edge TTS requires internet and may be rate-limited; no paid fallback is used. Long captions wrap into two-line cards paced across the scene. Uploaded clip audio is removed; no music is mixed.</p>
             </section>
             <div class="studio-render-settings">
-              <label>Aspect ratio
-                <select id="renderAspectRatio" class="select-sm"><option value="9:16">9:16 vertical</option></select>
+              <label>Output format
+                <select id="renderAspectRatio" class="select-sm">
+                  <option value="9:16">Vertical · 9:16</option>
+                  <option value="16:9">Landscape · 16:9</option>
+                </select>
               </label>
-              <label>Resolution
-                <input class="studio-input" value="1080 × 1920 · existing engine" readonly/>
+              <label>Output resolution
+                <input id="renderResolution" class="studio-input" value="1080 × 1920 · Vertical" readonly/>
               </label>
               <label>Frame rate
                 <select id="renderFps" class="select-sm">
