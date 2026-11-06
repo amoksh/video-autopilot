@@ -246,8 +246,39 @@ bash scripts/serve.sh
 
 In GitHub Codespaces, open the forwarded port shown for `8000` (or your configured
 `PORT`) in the **Ports** tab. Keep the port visibility **Private**; this prototype
-is intended for a private Codespace, not public deployment. The dashboard itself
-does not require API keys.
+is intended for a private Codespace or a deployment protected by the owner login below.
+
+### Private access and Render setup
+
+The web dashboard protects the Studio, projects, uploaded media, generated videos,
+downloads, settings, and API routes with a single-owner password. Set both variables
+before starting the web service:
+
+- `VA_ACCESS_PASSWORD`: a unique, strong dashboard password.
+- `VA_SESSION_SECRET`: a private random signing key with at least 32 characters.
+
+For a public Render web service, open **Render Dashboard → your Web Service → Environment**
+and add both variables as secret environment values. Generate a signing key locally with:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Copy the output directly into Render's `VA_SESSION_SECRET` value, and set a separate
+strong password in `VA_ACCESS_PASSWORD`. Do not put either value in source code, commit
+them, add them to the Docker image, or share them in logs. Render's HTTPS endpoint uses
+Secure, HttpOnly, SameSite=Lax sessions; sessions expire after 12 hours. The service
+fails closed if either value is missing or the signing key is too short. Never set
+`VA_LOCAL_AUTH_BYPASS` on Render.
+
+For local development, set `VA_ACCESS_PASSWORD` and `VA_SESSION_SECRET` in the
+untracked `.env` file and use the login page. The optional
+`VA_LOCAL_AUTH_BYPASS=1` with `VA_ENV=local` is for isolated local tests only; it is
+ignored when Render or production mode is detected. Do not expose a bypass-enabled local
+server to a network.
+Authenticated changes require a same-origin request, and private responses are sent
+with caching disabled. Render and Codespaces HTTPS termination are recognized when
+checking the browser origin; forwarded headers are not trusted in other environments.
 
 The Codespaces `postStartCommand` starts the existing dashboard automatically and
 opens its privately forwarded port in the browser. Startup output is saved to
@@ -363,8 +394,12 @@ port `8000` (or your configured `PORT`) in the **Ports** tab, and keep visibilit
 To verify offline without making live TTS requests, run:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+VA_ENV=local VA_LOCAL_AUTH_BYPASS=1 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+The legacy integration tests can be run locally without setting a dashboard password by
+using the local-only bypass; authentication-specific tests clear it while validating the
+login boundary and fail-closed production configuration.
 
 The Auto Director tests cover ranked matching, metadata persistence, one-click render,
 uncertain-match review and resume, manual assignment preservation, and failed-render export

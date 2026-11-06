@@ -1,23 +1,31 @@
 """Web dashboard for Video Autopilot."""
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import html
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Literal, Optional
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -49,6 +57,292 @@ ADAPTIVE_MIN_SCENE_SECONDS = 2.5
 ADAPTIVE_MAX_RECOMMENDED_SECONDS = 6.0
 
 app = FastAPI(title="Video Autopilot")
+
+AUTH_COOKIE_NAME = "va_session"
+AUTH_SESSION_MAX_AGE = 12 * 60 * 60
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+
+
+def _is_production() -> bool:
+    return (
+        os.environ.get("RENDER", "").lower() == "true"
+        or os.environ.get("VA_ENV", "").lower() == "production"
+        or os.environ.get("ENVIRONMENT", "").lower() == "production"
+    )
+
+
+def _local_auth_bypass() -> bool:
+    return (
+        os.environ.get("VA_LOCAL_AUTH_BYPASS") == "1"
+        and os.environ.get("VA_ENV", "").lower() in {"local", "test"}
+        and not _is_production()
+    )
+
+
+def _auth_settings() -> tuple[str, str] | None:
+    password = os.environ.get("VA_ACCESS_PASSWORD", "")
+    secret = os.environ.get("VA_SESSION_SECRET", "")
+    if not password or len(secret) < 32:
+        return None
+    return password, secret
+
+
+def _encode_session(secret: str) -> str:
+    payload = json.dumps(
+        {
+            "authenticated": True,
+            "issued_at": int(time.time()),
+            "owner": "single",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    encoded_payload = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        b"video-autopilot-session-v1." + encoded_payload,
+        hashlib.sha256,
+    ).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=")
+    return b".".join((encoded_payload, encoded_signature)).decode("ascii")
+
+
+def _session_is_valid(request: Request, secret: str) -> bool:
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if not token:
+        return False
+    try:
+        encoded_payload, encoded_signature = token.encode("ascii").split(b".")
+        expected_signature = hmac.new(
+            secret.encode("utf-8"),
+            b"video-autopilot-session-v1." + encoded_payload,
+            hashlib.sha256,
+        ).digest()
+        supplied_signature = base64.urlsafe_b64decode(
+            encoded_signature + b"=" * (-len(encoded_signature) % 4),
+        )
+        if not hmac.compare_digest(expected_signature, supplied_signature):
+            return False
+        payload = base64.urlsafe_b64decode(
+            encoded_payload + b"=" * (-len(encoded_payload) % 4),
+        )
+        session = json.loads(payload)
+    except (ValueError, UnicodeError, binascii.Error, json.JSONDecodeError):
+        return False
+    if not isinstance(session, dict) or set(session) != {
+        "authenticated", "issued_at", "owner",
+    }:
+        return False
+    issued_at = session["issued_at"]
+    return (
+        session["authenticated"] is True
+        and session["owner"] == "single"
+        and type(issued_at) is int
+        and 0 <= time.time() - issued_at <= AUTH_SESSION_MAX_AGE
+    )
+
+
+def _is_https_proxy_deployment() -> bool:
+    return (
+        os.environ.get("RENDER", "").lower() == "true"
+        or os.environ.get("CODESPACES", "").lower() == "true"
+    )
+
+
+def _request_scheme(request: Request) -> str:
+    # These platforms terminate TLS before forwarding HTTP to Uvicorn. Do not
+    # infer trust from client-controlled forwarded headers in other deployments.
+    if _is_https_proxy_deployment():
+        return "https"
+    return request.url.scheme
+
+
+def _same_origin_request(request: Request) -> bool:
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return False
+    parsed = urlsplit(source)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    try:
+        scheme = _request_scheme(request)
+        source_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        target_port = (
+            443
+            if _is_https_proxy_deployment()
+            else request.url.port or (443 if scheme == "https" else 80)
+        )
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == scheme
+        and parsed.hostname.lower() == (request.url.hostname or "").lower()
+        and source_port == target_port
+    )
+
+
+def _is_api_request(request: Request) -> bool:
+    return request.url.path == "/api" or request.url.path.startswith("/api/")
+
+
+def _private_headers(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.middleware("http")
+async def require_owner_authentication(request: Request, call_next):
+    if _local_auth_bypass():
+        return _private_headers(await call_next(request))
+
+    settings = _auth_settings()
+    if settings is None:
+        if _is_api_request(request):
+            response = JSONResponse(
+                {"detail": "Authentication is not configured"},
+                status_code=503,
+            )
+        else:
+            response = HTMLResponse(
+                "Authentication is not configured.", status_code=503,
+            )
+        return _private_headers(response)
+
+    exempt_paths = {"/login", "/logout"}
+    if request.url.path not in exempt_paths and not _session_is_valid(
+        request, settings[1],
+    ):
+        if _is_api_request(request):
+            response = JSONResponse(
+                {"detail": "Authentication required"}, status_code=401,
+            )
+        elif "text/html" in request.headers.get("accept", ""):
+            target = request.url.path
+            if request.url.query:
+                target += f"?{request.url.query}"
+            login_url = "/login?" + urlencode({"next": target})
+            response = RedirectResponse(login_url, status_code=303)
+        else:
+            response = JSONResponse(
+                {"detail": "Authentication required"}, status_code=401,
+            )
+        return _private_headers(response)
+
+    if request.method not in _SAFE_METHODS and not _same_origin_request(request):
+        response = JSONResponse(
+            {"detail": "Cross-origin request rejected"}, status_code=403,
+        )
+        return _private_headers(response)
+
+    return _private_headers(await call_next(request))
+
+
+def _safe_return_to(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        value.startswith("/")
+        and not value.startswith("//")
+        and "\\" not in value
+        and not parsed.scheme
+        and not parsed.netloc
+        and parsed.path.startswith("/")
+    ):
+        return value
+    return "/"
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    settings = _auth_settings()
+    if settings is None:
+        return HTMLResponse(
+            "Authentication is not configured.", status_code=503,
+        )
+    if _session_is_valid(request, settings[1]):
+        return RedirectResponse("/", status_code=303)
+    next_url = _safe_return_to(request.query_params.get("next", "/"))
+    escaped_next = html.escape(next_url, quote=True)
+    page = f"""<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Sign in · Video Autopilot</title>
+<style>
+body{{font:16px system-ui,sans-serif;background:#10121a;color:#f4f4f5;min-height:100vh;
+display:grid;place-items:center;margin:0}}main{{width:min(360px,calc(100% - 40px));
+padding:28px;background:#1a1d28;border:1px solid #343747;border-radius:12px}}
+h1{{font-size:22px;margin:0 0 20px}}label{{display:block;margin-bottom:8px}}
+input,button{{box-sizing:border-box;width:100%;padding:12px;border-radius:7px;
+font:inherit}}input{{color:#fff;background:#10121a;border:1px solid #45495a}}
+button{{margin-top:14px;border:0;background:#755cf5;color:white;font-weight:600;cursor:pointer}}
+</style>
+<main><h1>Video Autopilot</h1><form method="post" action="/login">
+<input type="hidden" name="next" value="{escaped_next}">
+<label for="password">Access password</label>
+<input id="password" name="password" type="password" required autofocus
+autocomplete="current-password">
+<button type="submit">Sign in</button></form></main></html>"""
+    return HTMLResponse(page)
+
+
+@app.post("/login")
+async def login(request: Request):
+    settings = _auth_settings()
+    if settings is None:
+        return HTMLResponse(
+            "Authentication is not configured.", status_code=503,
+        )
+    if request.headers.get("content-type", "").split(";", 1)[0].strip() != (
+        "application/x-www-form-urlencoded"
+    ):
+        return HTMLResponse("Invalid login request.", status_code=400)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 8192:
+                return HTMLResponse("Invalid login request.", status_code=400)
+        except ValueError:
+            return HTMLResponse("Invalid login request.", status_code=400)
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 8192:
+            return HTMLResponse("Invalid login request.", status_code=400)
+    if len(body) > 8192:
+        return HTMLResponse("Invalid login request.", status_code=400)
+    form = parse_qs(bytes(body).decode("utf-8", errors="replace"), keep_blank_values=True)
+    supplied_password = form.get("password", [""])[0]
+    if not secrets.compare_digest(
+        supplied_password.encode("utf-8"), settings[0].encode("utf-8"),
+    ):
+        return HTMLResponse("Invalid password.", status_code=401)
+
+    response = RedirectResponse(
+        _safe_return_to(form.get("next", ["/"])[0]), status_code=303,
+    )
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        _encode_session(settings[1]),
+        max_age=AUTH_SESSION_MAX_AGE,
+        httponly=True,
+        secure=_request_scheme(request) == "https",
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(
+        AUTH_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=_request_scheme(request) == "https",
+        samesite="lax",
+    )
+    return response
 
 
 # ── job manager ──────────────────────────────────────────────────────────────
