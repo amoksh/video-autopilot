@@ -13,7 +13,11 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, opts);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = new Error(data.detail || `HTTP ${r.status}`);
+    error.status = r.status;
+    throw error;
+  }
   return data;
 }
 
@@ -54,6 +58,1268 @@ function navigateTo(name) {
   VIEWS[name]?.();
 }
 window.navigateTo = navigateTo;
+
+// ════════════════════════════════════════════════════════
+// VIDEO AUTOPILOT STUDIO
+// ════════════════════════════════════════════════════════
+const STUDIO_PROJECT_KEY = 'video-autopilot-studio-project';
+let studioProjects = [];
+let studioProject = null;
+let studioMedia = [];
+let studioScenes = [];
+let studioSuggestions = {};
+let studioAutoReview = false;
+let studioAutoReviewSceneIds = [];
+let studioAutoReviewSubmitting = false;
+let studioExports = [];
+let studioRenderJob = null;
+let studioRenderTimer = null;
+let studioAutoWorkflow = false;
+let studioAutoStoryWorkflow = false;
+let studioAutoStorySaveTimer = null;
+
+function studioSceneHasValidMedia(scene) {
+  return Boolean(scene.media_id && studioMedia.some(item => item.id === scene.media_id));
+}
+
+function studioSceneIsReviewed(scene) {
+  return scene.approved === true &&
+    studioSceneHasValidMedia(scene) &&
+    scene.reviewed_media_id === scene.media_id;
+}
+
+function mediaUrl(item) {
+  return `/api/studio/media/${studioProject.id}/${item.id}`;
+}
+
+function showStudioPreview(url, kind, title) {
+  const stage = $('#studioPreviewStage');
+  if (kind === 'image') {
+    stage.innerHTML = `<img src="${esc(url)}" alt="${esc(title)}"/>`;
+  } else {
+    stage.innerHTML = `<video src="${esc(url)}" controls playsinline preload="metadata"></video>`;
+  }
+  $('#previewCaption').textContent = title;
+}
+
+function renderStudioMedia() {
+  const grid = $('#studioMediaGrid');
+  $('#mediaCount').textContent = studioMedia.length;
+  $('#masterStoryBrief').disabled = !studioProject;
+  $('#useUploadOrderFallback').disabled = !studioProject;
+  $('#replaceReviewedAssignments').disabled = !studioProject;
+  renderStudioScenes();
+  updateStudioRenderButton();
+  if (!studioProject) {
+    grid.innerHTML = '<div class="studio-empty">Create or open a project to start adding media.</div>';
+    return;
+  }
+  if (!studioMedia.length) {
+    grid.innerHTML = '<div class="studio-empty">No media in this project yet. Upload JPG, PNG, WEBP, or MP4 files above.</div>';
+    return;
+  }
+  grid.innerHTML = studioMedia.map((item, index) => {
+    const url = mediaUrl(item);
+    const isVideo = item.extension === '.mp4';
+    const preview = item.thumbnail_url
+      ? `<img src="${esc(item.thumbnail_url)}" alt="Representative frame from ${esc(item.name)}" loading="lazy"/>`
+      : (isVideo
+        ? `<video src="${esc(url)}" muted preload="metadata"></video>`
+        : `<img src="${esc(url)}" alt="${esc(item.name)}" loading="lazy"/>`);
+    const technical = item.technical_metadata || {};
+    const technicalSummary = technical.extraction_error
+      ? `Technical metadata unavailable: ${technical.extraction_error}`
+      : [
+        technical.duration_seconds != null &&
+          Number.isFinite(Number(technical.duration_seconds))
+          ? `${Number(technical.duration_seconds).toFixed(1)} sec`
+          : null,
+        technical.width && technical.height ? `${technical.width}×${technical.height}` : null,
+        technical.frame_rate ? `${technical.frame_rate} FPS` : null,
+      ].filter(Boolean).join(' · ') || 'Technical metadata unavailable';
+    return `<article class="studio-media-item" data-media-index="${index}">
+      <button class="studio-media-preview" data-media-preview="${index}" aria-label="Preview ${esc(item.name)}">${preview}<span class="media-type">${isVideo ? 'VIDEO' : 'IMAGE'}</span></button>
+      <div class="studio-media-meta"><span class="studio-media-name" title="${esc(item.name)}">${esc(item.name)}</span><span class="studio-media-size">${(item.size / (1024 * 1024)).toFixed(1)} MB</span></div>
+      <div class="studio-technical-meta"><strong>Technical metadata (FFprobe):</strong> ${esc(technicalSummary)}<br/>Clip meaning comes from saved descriptions; thumbnails are previews only.${technical.thumbnail_error ? `<br/>Thumbnail unavailable: ${esc(technical.thumbnail_error)}` : ''}</div>
+      <div class="studio-media-metadata" data-media-metadata="${index}">
+        <label>Description<textarea class="studio-input" data-media-meta="description" rows="2" maxlength="2000">${esc(item.description || '')}</textarea></label>
+        <label>Keywords<input class="studio-input" data-media-meta="keywords" maxlength="1000" value="${esc((item.keywords || []).join(', '))}" placeholder="comma-separated"/></label>
+        <label>Characters<input class="studio-input" data-media-meta="characters" maxlength="700" value="${esc((item.characters || []).join(', '))}" placeholder="comma-separated"/></label>
+        <label>Location<input class="studio-input" data-media-meta="location" maxlength="300" value="${esc(item.location || '')}"/></label>
+        <label>Mood<input class="studio-input" data-media-meta="mood" maxlength="300" value="${esc(item.mood || '')}"/></label>
+      </div>
+      <div class="studio-media-controls">
+        <button class="media-order-btn" data-media-move="-1" data-media-index="${index}" aria-label="Move up" ${index === 0 ? 'disabled' : ''}>↑</button>
+        <button class="media-order-btn" data-media-move="1" data-media-index="${index}" aria-label="Move down" ${index === studioMedia.length - 1 ? 'disabled' : ''}>↓</button>
+        <button class="media-remove-btn" data-media-remove="${index}">Remove</button>
+      </div>
+    </article>`;
+  }).join('');
+
+  $$('[data-media-preview]').forEach(button => button.addEventListener('click', () => {
+    const item = studioMedia[Number(button.dataset.mediaPreview)];
+    showStudioPreview(mediaUrl(item), item.extension === '.mp4' ? 'video' : 'image', item.name);
+  }));
+  $$('[data-media-move]').forEach(button => button.addEventListener('click', () => {
+    moveStudioMedia(Number(button.dataset.mediaIndex), Number(button.dataset.mediaMove));
+  }));
+  $$('[data-media-remove]').forEach(button => button.addEventListener('click', () => {
+    removeStudioMedia(studioMedia[Number(button.dataset.mediaRemove)]);
+  }));
+  $$('[data-media-metadata]').forEach(form => {
+    form.querySelectorAll('[data-media-meta]').forEach(input => {
+      input.addEventListener('change', () => saveStudioMediaMetadata(
+        studioMedia[Number(form.dataset.mediaMetadata)], form,
+      ));
+    });
+  });
+}
+
+function metadataList(value) {
+  return value.split(/[,\n]/).map(item => item.trim()).filter(Boolean);
+}
+
+async function saveStudioMediaMetadata(item, form, notify = true) {
+  if (!item || !studioProject) return;
+  const value = name => form.querySelector(`[data-media-meta="${name}"]`).value;
+  const metadata = {
+    description: value('description'),
+    keywords: metadataList(value('keywords')),
+    characters: metadataList(value('characters')),
+    location: value('location'),
+    mood: value('mood'),
+  };
+  try {
+    const updated = await api(`/studio/projects/${studioProject.id}/media/${item.id}/metadata`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata),
+    });
+    Object.assign(item, updated);
+    studioSuggestions = {};
+    studioAutoReview = false;
+    studioAutoReviewSceneIds = [];
+    studioScenes.forEach(scene => {
+      if (scene.assignment_source === 'auto') scene.approved = false;
+    });
+    renderStudioScenes();
+    if (notify) toast(`Metadata saved for ${item.name}`, 'success');
+    return true;
+  } catch (e) {
+    toast(`Could not save clip metadata: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+async function saveVisibleStudioMetadata() {
+  for (const form of $$('[data-media-metadata]')) {
+    const item = studioMedia[Number(form.dataset.mediaMetadata)];
+    if (!item) continue;
+    const payload = {
+      description: form.querySelector('[data-media-meta="description"]').value.trim(),
+      keywords: metadataList(form.querySelector('[data-media-meta="keywords"]').value),
+      characters: metadataList(form.querySelector('[data-media-meta="characters"]').value),
+      location: form.querySelector('[data-media-meta="location"]').value.trim(),
+      mood: form.querySelector('[data-media-meta="mood"]').value.trim(),
+    };
+    const saved = {
+      description: item.description || '',
+      keywords: metadataList(Array.isArray(item.keywords) ? item.keywords.join(', ') : item.keywords || ''),
+      characters: metadataList(Array.isArray(item.characters) ? item.characters.join(', ') : item.characters || ''),
+      location: item.location || '',
+      mood: item.mood || '',
+    };
+    if (JSON.stringify(payload) !== JSON.stringify(saved) &&
+        !await saveStudioMediaMetadata(item, form, false)) {
+      throw new Error(`Could not save metadata for ${item.name}`);
+    }
+  }
+}
+
+function studioAudioSettings() {
+  return {
+    voiceover_enabled: $('#studioVoiceoverEnabled').checked,
+    captions_enabled: $('#studioCaptionsEnabled').checked,
+    voice: $('#studioVoice').value,
+    speech_buffer: Number($('#studioSpeechBuffer').value),
+    caption_size: $('#studioCaptionSize').value,
+    caption_position: $('#studioCaptionPosition').value,
+  };
+}
+
+function updateStudioAudioControls() {
+  const enabled = $('#studioVoiceoverEnabled').checked;
+  $('#studioVoice').disabled = !enabled;
+  $('#studioSpeechBuffer').disabled = !enabled;
+  const captionsEnabled = $('#studioCaptionsEnabled').checked;
+  $('#studioCaptionSize').disabled = !captionsEnabled;
+  $('#studioCaptionPosition').disabled = !captionsEnabled;
+}
+
+function studioAutoStoryInput() {
+  return {
+    master_story_brief: $('#masterStoryBrief').value,
+    use_upload_order_fallback: $('#useUploadOrderFallback').checked,
+    adaptive_pacing: $('#adaptivePacing').checked,
+    audio_settings: studioAudioSettings(),
+  };
+}
+
+function renderAutoStoryPlan(plan = [], required = [], orderingNote = '') {
+  const container = $('#autoStoryPlan');
+  const messages = required.map(message => `<li>${esc(message)}</li>`).join('');
+  const rows = plan.map(scene => `<tr>
+    <td>${esc(scene.scene_number)}</td>
+    <td>${esc(scene.text)}</td>
+    <td>${esc(scene.asset_name || 'Needs input')}</td>
+    <td><strong>${esc(scene.basis)}</strong><small>${esc(scene.details || '')}</small></td>
+  </tr>`).join('');
+  container.innerHTML = `${orderingNote ? `<p class="studio-story-note">${esc(orderingNote)}</p>` : ''}
+    ${messages ? `<div class="studio-auto-input-required"><strong>Needs input</strong><ul>${messages}</ul></div>` : ''}
+    ${rows ? `<div class="studio-kicker">SCENE-TO-ASSET PLAN · ACTUAL MATCH BASIS</div><div class="studio-auto-plan-table-wrap"><table class="studio-auto-plan-table"><thead><tr><th>Scene</th><th>Narration</th><th>Selected upload</th><th>Basis</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+}
+
+function renderSavedAutoStoryPlan() {
+  const plan = studioScenes.filter(scene => scene.match_basis).map(scene => ({
+    scene_number: scene.scene_number || studioScenes.indexOf(scene) + 1,
+    text: scene.text,
+    asset_name: studioMedia.find(item => item.id === scene.media_id)?.name,
+    basis: scene.match_basis,
+    details: scene.match_details,
+  }));
+  renderAutoStoryPlan(plan);
+}
+
+function setStudioMode(mode) {
+  const auto = mode === 'auto';
+  $('#studioAutoModePanel').hidden = !auto;
+  $('#studioManualModePanel').hidden = auto;
+  $('#autoModeTab').classList.toggle('active', auto);
+  $('#manualModeTab').classList.toggle('active', !auto);
+  $('#autoModeTab').setAttribute('aria-selected', String(auto));
+  $('#manualModeTab').setAttribute('aria-selected', String(!auto));
+}
+
+function scheduleStudioAutoStorySave() {
+  if (!studioProject) return;
+  if (studioAutoStorySaveTimer) clearTimeout(studioAutoStorySaveTimer);
+  const projectId = studioProject.id;
+  studioAutoStorySaveTimer = setTimeout(async () => {
+    try {
+      await api(`/studio/projects/${projectId}/auto-story/input`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(studioAutoStoryInput()),
+      });
+      if (studioProject?.id === projectId) {
+        $('#autoStoryInputStatus').textContent = 'Master brief and audio settings saved to this project.';
+      }
+    } catch (e) {
+      if (studioProject?.id === projectId) {
+        $('#autoStoryInputStatus').textContent = `Could not save Auto Mode inputs: ${e.message}`;
+      }
+    }
+  }, 500);
+}
+
+function updateStudioStoryEstimate() {
+  const total = studioScenes.length
+    ? studioScenes.reduce((sum, scene) => sum + (Number(scene.duration) || 0), 0)
+    : ($('#storyScript').value.trim()
+      ? 0
+      : studioMedia.length * Number($('#renderSceneSeconds').value || 0));
+  $('#storyDurationEstimate').textContent =
+    `Requested scene timeline: ${total.toFixed(1)} seconds; narration may extend it after TTS.`;
+}
+
+function updateStudioRenderButton() {
+  const pending = studioScenes.some(scene =>
+    !studioSceneIsReviewed(scene));
+  const rendering = ['queued', 'running'].includes(studioRenderJob?.status);
+  $('#studioGenerateBtn').disabled = !studioProject || !studioMedia.length ||
+    pending || rendering;
+  $('#autoCreateVideoBtn').disabled = !studioProject || !studioMedia.length ||
+    rendering || $('#autoCreateVideoBtn').dataset.running === 'true';
+  $('#createStoryVideoBtn').disabled = !studioProject || rendering ||
+    $('#createStoryVideoBtn').dataset.running === 'true';
+  $('#autoArrangeBtn').disabled = !studioProject || !studioMedia.length ||
+    !studioScenes.length || rendering;
+  const confirmButton = $('#confirmAutoReviewBtn');
+  confirmButton.hidden = !studioAutoReview || !studioAutoReviewSceneIds.length;
+  confirmButton.disabled = rendering || studioAutoReviewSubmitting ||
+    !studioAutoReviewSceneIds.length ||
+    !studioScenes.every(studioSceneIsReviewed) ||
+    !studioAutoReviewSceneIds.every(id => {
+      const scene = studioScenes.find(item => item.id === id);
+      return scene && studioSceneIsReviewed(scene);
+    });
+}
+
+function invalidateStudioSuggestions() {
+  studioSuggestions = {};
+  studioAutoReview = false;
+  studioAutoReviewSceneIds = [];
+  studioScenes.forEach(scene => {
+    if (scene.assignment_source === 'auto') scene.approved = false;
+  });
+  $('#autoDirectorStatus').textContent =
+    'Scene details changed. Re-run Auto Create Video or Auto Arrange to refresh rankings.';
+  renderStudioScenes();
+}
+
+function renderStudioScenes() {
+  const clipList = $('#studioRenderClipList');
+  const enabled = Boolean(studioProject);
+  $('#storyScript').disabled = !enabled;
+  $('#buildStoryScenesBtn').disabled = !enabled;
+  $('#saveStoryBtn').disabled = !enabled;
+  $('#autoArrangeBtn').disabled = !enabled || !studioScenes.length;
+  if (!studioScenes.length) {
+    clipList.innerHTML = `<div class="studio-empty">${$('#storyScript').value.trim()
+      ? 'Build scene blocks from your script before assigning media.'
+      : 'Build scene blocks from a script, or leave the script empty for media-only rendering.'}</div>`;
+    updateStudioStoryEstimate();
+    updateStudioRenderButton();
+    return;
+  }
+  clipList.innerHTML = studioScenes.map((scene, index) => {
+    const selected = studioMedia.find(item => item.id === scene.media_id);
+    const clipName = selected ? selected.name : 'No clip assigned';
+    const assignedMediaOptions = studioMedia.map(item =>
+      `<option value="${esc(item.id)}" ${item.id === scene.media_id ? 'selected' : ''}>${esc(item.name)} · ${item.extension === '.mp4' ? 'VIDEO' : 'IMAGE'}</option>`
+    ).join('');
+    const ranked = studioSuggestions[scene.id] || [];
+    const needsReview = studioAutoReviewSceneIds.includes(scene.id);
+    const rankedOptions = needsReview
+      ? ranked.filter(suggestion => suggestion.matchable).slice(0, 5)
+      : ranked.slice(0, 5);
+    const suggestions = rankedOptions.map((suggestion, rank) => {
+      const confidence = suggestion.confidence === 'high'
+        ? (suggestion.auto_assignable
+          ? 'Clear high overlap'
+          : needsReview && rank === 0
+            ? `High overlap · ${Number(suggestion.margin).toFixed(1)}pt lead over next`
+            : 'High heuristic overlap')
+        : suggestion.confidence === 'moderate'
+          ? 'Moderate heuristic overlap' : 'Uncertain / Needs Review';
+      const selectedForReview = scene.media_id === suggestion.media_id;
+      return `<button class="studio-suggestion${selectedForReview ? ' selected' : ''}" type="button" data-suggest-scene="${esc(scene.id)}" data-suggest-media="${esc(suggestion.media_id)}" ${needsReview ? 'data-review-suggest="true"' : ''}>
+        <span class="studio-suggestion-rank">${rank + 1}</span>
+        <span class="studio-suggestion-body"><strong>${esc(suggestion.name)}</strong>
+          <span>${Number(suggestion.score).toFixed(1)}% · ${confidence} · ${suggestion.metadata_fields}/5 saved metadata fields</span>
+          <small>${esc(suggestion.reasons.join('; '))}</small>
+        </span>
+      </button>`;
+    }).join('');
+    const suggestionList = ranked.length
+      ? `<div class="studio-suggestions"><div class="studio-kicker">${needsReview ? 'GROUNDED RANKED OPTIONS · SELECT FOR CONFIRMATION' : 'RANKED TEXT-METADATA SUGGESTIONS · SELECT TO ASSIGN'}</div>${suggestions}${!rankedOptions.length ? '<small>No grounded options are available. Add clip metadata or assign media manually.</small>' : ''}${!needsReview && ranked.length > 5 ? `<small>Showing top 5 of ${ranked.length} clips.</small>` : ''}</div>`
+      : '';
+    return `<article class="studio-scene" data-scene-index="${index}">
+      <div class="studio-scene-heading">
+        <span class="studio-render-clip-index">${index + 1}</span>
+        <strong>Scene ${index + 1}</strong>
+        ${needsReview ? '<span class="studio-review-badge">Needs review</span>' : ''}
+        <label class="studio-scene-approval"><input type="checkbox" data-scene-approved="${index}" ${studioSceneIsReviewed(scene) ? 'checked' : ''}/> I reviewed this assignment</label>
+        <div class="studio-scene-order">
+          <button class="media-order-btn" data-scene-move="-1" data-scene-index="${index}" aria-label="Move scene ${index + 1} up" ${index === 0 ? 'disabled' : ''}>↑</button>
+          <button class="media-order-btn" data-scene-move="1" data-scene-index="${index}" aria-label="Move scene ${index + 1} down" ${index === studioScenes.length - 1 ? 'disabled' : ''}>↓</button>
+        </div>
+      </div>
+      <label class="studio-scene-field">Scene text
+        <textarea class="studio-input studio-scene-text" data-scene-text="${index}" rows="2" maxlength="5000">${esc(scene.text)}</textarea>
+      </label>
+      <div class="studio-scene-controls">
+        <label class="studio-scene-field">Assigned media
+          <select class="select-sm" data-scene-media="${index}">
+            <option value="">Select uploaded media</option>${assignedMediaOptions}
+          </select>
+        </label>
+        <label class="studio-scene-field studio-scene-duration">Duration
+          <span><input class="studio-input" data-scene-duration="${index}" type="number" min="0.5" max="30" step="0.1" value="${esc(scene.duration)}"/> sec</span>
+        </label>
+      </div>
+      <details class="studio-scene-metadata">
+        <summary>Optional scene matching metadata</summary>
+        <div class="studio-scene-metadata-grid">
+          <label class="studio-scene-field">Visual description
+            <textarea class="studio-input" data-scene-metadata="${index}" data-scene-field="visual_description" rows="2" maxlength="2000">${esc(scene.visual_description || '')}</textarea>
+          </label>
+          <label class="studio-scene-field">Characters
+            <input class="studio-input" data-scene-metadata="${index}" data-scene-field="characters" maxlength="700" value="${esc((scene.characters || []).join(', '))}" placeholder="comma-separated"/>
+          </label>
+          <label class="studio-scene-field">Location
+            <input class="studio-input" data-scene-metadata="${index}" data-scene-field="location" maxlength="300" value="${esc(scene.location || '')}"/>
+          </label>
+          <label class="studio-scene-field">Mood
+            <input class="studio-input" data-scene-metadata="${index}" data-scene-field="mood" maxlength="300" value="${esc(scene.mood || '')}"/>
+          </label>
+          <label class="studio-scene-field">Intended action
+            <textarea class="studio-input" data-scene-metadata="${index}" data-scene-field="intended_action" rows="2" maxlength="1000">${esc(scene.intended_action || '')}</textarea>
+          </label>
+        </div>
+      </details>
+      ${suggestionList}
+      <div class="studio-scene-timeline">
+        <span class="studio-kicker">TIMELINE · ${String(index + 1).padStart(2, '0')}</span>
+        <p class="studio-timeline-text">${esc(scene.text)}</p>
+        <div><span class="studio-timeline-clip">${esc(clipName)} · ${scene.assignment_source === 'auto' ? 'Auto suggestion' : 'Manual assignment'}</span><span class="studio-timeline-duration">${Number(scene.duration).toFixed(1)} sec</span></div>
+      </div>
+    </article>`;
+  }).join('');
+
+  $$('[data-scene-text]').forEach(input => input.addEventListener('input', () => {
+    const index = Number(input.dataset.sceneText);
+    studioScenes[index].text = input.value;
+    const summary = input.closest('.studio-scene').querySelector('.studio-timeline-text');
+    summary.textContent = input.value || 'Scene text';
+  }));
+  $$('[data-scene-text]').forEach(input =>
+    input.addEventListener('change', invalidateStudioSuggestions));
+  $$('[data-scene-metadata]').forEach(input => {
+    const update = () => {
+      const scene = studioScenes[Number(input.dataset.sceneMetadata)];
+      const field = input.dataset.sceneField;
+      scene[field] = field === 'characters' ? metadataList(input.value) : input.value;
+    };
+    input.addEventListener('input', update);
+    input.addEventListener('change', invalidateStudioSuggestions);
+  });
+  $$('[data-scene-media]').forEach(select => select.addEventListener('change', () => {
+    const index = Number(select.dataset.sceneMedia);
+    studioScenes[index].media_id = select.value || null;
+    studioScenes[index].assignment_source = 'manual';
+    studioScenes[index].match_basis = null;
+    studioScenes[index].match_details = '';
+    studioScenes[index].approved = false;
+    studioScenes[index].reviewed_media_id = null;
+    updateStudioRenderButton();
+    renderStudioScenes();
+  }));
+  $$('[data-scene-duration]').forEach(input => input.addEventListener('input', () => {
+    const index = Number(input.dataset.sceneDuration);
+    const duration = Number(input.value);
+    if (Number.isFinite(duration) && duration >= 0.5 && duration <= 30) {
+      studioScenes[index].duration = duration;
+      input.closest('.studio-scene').querySelector('.studio-timeline-duration').textContent =
+        `${duration.toFixed(1)} sec`;
+      updateStudioStoryEstimate();
+    }
+  }));
+  $$('[data-scene-move]').forEach(button => button.addEventListener('click', () => {
+    moveStudioScene(Number(button.dataset.sceneIndex), Number(button.dataset.sceneMove));
+  }));
+  $$('[data-scene-approved]').forEach(input => input.addEventListener('change', () => {
+    const scene = studioScenes[Number(input.dataset.sceneApproved)];
+    scene.approved = Boolean(input.checked && studioSceneHasValidMedia(scene));
+    scene.reviewed_media_id = scene.approved ? scene.media_id : null;
+    input.checked = studioSceneIsReviewed(scene);
+    updateStudioRenderButton();
+  }));
+  $$('[data-suggest-media]').forEach(button => button.addEventListener('click', () => {
+    const scene = studioScenes.find(item => item.id === button.dataset.suggestScene);
+    if (!scene) return;
+    if (button.dataset.reviewSuggest) {
+      scene.media_id = button.dataset.suggestMedia;
+      scene.assignment_source = 'manual';
+      scene.match_basis = null;
+      scene.match_details = '';
+      scene.approved = false;
+      scene.reviewed_media_id = null;
+      renderStudioScenes();
+      return;
+    }
+    scene.media_id = button.dataset.suggestMedia;
+    scene.assignment_source = 'manual';
+    scene.match_basis = null;
+    scene.match_details = '';
+    scene.approved = false;
+    scene.reviewed_media_id = null;
+    renderStudioScenes();
+  }));
+  updateStudioStoryEstimate();
+  updateStudioRenderButton();
+}
+
+function buildStudioScenes() {
+  const lines = $('#storyScript').value.split(/\r?\n+/).map(line => line.trim()).filter(Boolean);
+  studioScenes = lines.map((text, index) => {
+    const existing = studioScenes[index];
+    return {
+      id: existing?.id || crypto.randomUUID().replaceAll('-', ''),
+      text,
+      media_id: existing?.media_id || null,
+      duration: existing?.duration || Number($('#renderSceneSeconds').value) || 2.3,
+      visual_description: existing?.visual_description || '',
+      characters: existing?.characters || [],
+      location: existing?.location || '',
+      mood: existing?.mood || '',
+      intended_action: existing?.intended_action || '',
+      assignment_source: existing?.assignment_source || 'manual',
+      approved: existing?.approved ?? Boolean(existing?.media_id),
+      reviewed_media_id: existing?.reviewed_media_id ??
+        ((existing?.approved ?? Boolean(existing?.media_id))
+          ? existing.media_id : null),
+    };
+  });
+  studioSuggestions = {};
+  $('#autoDirectorStatus').textContent = '';
+  renderStudioScenes();
+}
+
+async function saveStudioStory() {
+  if (!studioProject) return;
+  const saveButton = $('#saveStoryBtn');
+  saveButton.disabled = true;
+  try {
+    const result = await api(`/studio/projects/${studioProject.id}/story`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        script: $('#storyScript').value,
+        scenes: studioScenes,
+        audio_settings: studioAudioSettings(),
+        master_story_brief: $('#masterStoryBrief').value,
+      }),
+    });
+    studioScenes = result.scenes;
+    renderStudioScenes();
+    return true;
+  } catch (e) {
+    toast('Could not save story: ' + e.message, 'error');
+    return false;
+  } finally {
+    saveButton.disabled = !studioProject;
+  }
+}
+
+async function autoArrangeStudioScenes() {
+  if (!studioProject || !studioScenes.length) return;
+  const hasAssignments = studioScenes.some(scene => scene.media_id);
+  const confirmOverwrite = hasAssignments && window.confirm(
+    'Auto Arrange will replace existing scene assignments. Continue?',
+  );
+  if (hasAssignments && !confirmOverwrite) return;
+  const button = $('#autoArrangeBtn');
+  button.disabled = true;
+  $('#autoDirectorStatus').textContent = 'Ranking clips against saved scene text and metadata…';
+  try {
+    if (!await saveStudioStory()) {
+      $('#autoDirectorStatus').textContent = 'Could not save scene changes; review the reported save error.';
+      return;
+    }
+    const result = await api(`/studio/projects/${studioProject.id}/auto-director/arrange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm_overwrite: confirmOverwrite }),
+    });
+    studioScenes = result.scenes;
+    studioSuggestions = Object.fromEntries(
+      result.suggestions.map(item => [item.scene_id, item.ranked_clips]),
+    );
+    const uncertain = studioScenes.filter(scene => !scene.media_id).length;
+    $('#autoDirectorStatus').textContent = uncertain
+      ? `Suggestions ready. ${uncertain} scene${uncertain === 1 ? '' : 's'} are Uncertain / Needs Review and remain unassigned.`
+      : 'Suggestions ready. Every suggested assignment needs your review and approval.';
+    renderStudioScenes();
+    toast('Deterministic clip suggestions are ready for review', 'success');
+  } catch (e) {
+    $('#autoDirectorStatus').textContent = `Auto Arrange failed: ${e.message}`;
+    toast('Auto Arrange failed: ' + e.message, 'error');
+  } finally {
+    updateStudioRenderButton();
+  }
+}
+
+function studioRenderSettings() {
+  return {
+    aspect_ratio: $('#renderAspectRatio').value,
+    fps: Number($('#renderFps').value),
+    seconds_per_scene: Number($('#renderSceneSeconds').value),
+    export_preset: $('#exportPreset').value,
+    image_motion: $('#imageMotion').value === 'true',
+    transition: $('#sceneTransition').value,
+  };
+}
+
+async function saveStudioQualitySettings() {
+  if (!studioProject) return;
+  const projectId = studioProject.id;
+  const status = $('#qualitySettingsStatus');
+  status.textContent = 'Saving quality options…';
+  try {
+    await api(`/studio/projects/${projectId}/quality-settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_motion: $('#imageMotion').value === 'true',
+        transition: $('#sceneTransition').value,
+        export_preset: $('#exportPreset').value,
+      }),
+    });
+    if (studioProject?.id === projectId) status.textContent = 'Quality options saved to this project.';
+  } catch (e) {
+    if (studioProject?.id === projectId) {
+      status.textContent = `Could not save quality options: ${e.message}`;
+      toast('Could not save quality options: ' + e.message, 'error');
+    }
+  }
+}
+
+function setStudioWorkflowStatus(status, message) {
+  const statusEl = $('#studioJobStatus');
+  statusEl.dataset.status = status;
+  statusEl.textContent = `${status.replace('_', ' ')}: ${message}`;
+  const directorStatus = $('#autoDirectorStatus');
+  directorStatus.dataset.status = status;
+  directorStatus.textContent = `${status.replace('_', ' ')}: ${message}`;
+}
+
+async function monitorStudioRender(job) {
+  studioRenderJob = job;
+  await loadStudioJobStatus();
+  if (studioRenderJob &&
+      ['queued', 'running'].includes(studioRenderJob.status)) {
+    if (studioRenderTimer) clearInterval(studioRenderTimer);
+    studioRenderTimer = setInterval(loadStudioJobStatus, 1500);
+  }
+}
+
+async function autoCreateStudioVideo() {
+  if (!studioProject || !studioMedia.length ||
+      ['queued', 'running'].includes(studioRenderJob?.status)) return;
+  const button = $('#autoCreateVideoBtn');
+  button.dataset.running = 'true';
+  studioAutoWorkflow = true;
+  button.disabled = true;
+  studioAutoReview = false;
+  studioAutoReviewSceneIds = [];
+  studioAutoReviewSubmitting = false;
+  studioAutoStoryWorkflow = false;
+  try {
+    if (!studioScenes.length && $('#storyScript').value.trim()) {
+      buildStudioScenes();
+    }
+    setStudioWorkflowStatus('analyzing', 'saving current clip descriptions and project settings');
+    await saveVisibleStudioMetadata();
+    if (!await saveStudioStory()) {
+      throw new Error('Could not save story edits');
+    }
+    setStudioWorkflowStatus('matching', 'comparing saved clip metadata with story scenes');
+    const result = await api(`/studio/projects/${studioProject.id}/auto-director/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(studioRenderSettings()),
+    });
+    studioScenes = (result.scenes || []).map(scene => ({
+      ...scene,
+      characters: Array.isArray(scene.characters) ? scene.characters : [],
+      reviewed_media_id: scene.reviewed_media_id ??
+        (scene.approved === true ? scene.media_id : null),
+    }));
+    studioSuggestions = Object.fromEntries(
+      (result.suggestions || []).map(item => [item.scene_id, item.ranked_clips]),
+    );
+    studioAutoReviewSceneIds = result.review_scene_ids || [];
+    studioAutoReview = result.status === 'needs_review';
+    renderStudioScenes();
+    if (studioAutoReview) {
+      const count = studioAutoReviewSceneIds.length;
+      setStudioWorkflowStatus(
+        'needs_review',
+        `${count} scene${count === 1 ? '' : 's'} need confirmation. Assign an uploaded clip to each scene and review every assignment, then confirm once to render.`,
+      );
+      updateStudioRenderButton();
+      return;
+    }
+    await monitorStudioRender(result.job);
+  } catch (e) {
+    setStudioWorkflowStatus('failed', e.message);
+    toast('Auto Create Video failed: ' + e.message, 'error');
+  } finally {
+    button.dataset.running = 'false';
+    updateStudioRenderButton();
+  }
+}
+
+async function createStudioStoryVideo() {
+  if (!studioProject || ['queued', 'running'].includes(studioRenderJob?.status)) return;
+  const previousJobId = studioRenderJob?.id;
+  const brief = $('#masterStoryBrief').value.trim();
+  if (!brief) {
+    $('#autoStoryInputStatus').textContent = 'Needs input: enter a Master Story Brief.';
+    $('#masterStoryBrief').focus();
+    return;
+  }
+  const button = $('#createStoryVideoBtn');
+  if (studioAutoStorySaveTimer) {
+    clearTimeout(studioAutoStorySaveTimer);
+    studioAutoStorySaveTimer = null;
+  }
+  button.dataset.running = 'true';
+  studioAutoWorkflow = false;
+  studioAutoReview = false;
+  studioAutoReviewSceneIds = [];
+  studioAutoReviewSubmitting = false;
+  studioAutoStoryWorkflow = true;
+  button.disabled = true;
+  $('#autoStoryInputStatus').textContent = 'Planning: saving your brief and project settings…';
+  try {
+    await api(`/studio/projects/${studioProject.id}/auto-story/input`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(studioAutoStoryInput()),
+    });
+    $('#autoStoryInputStatus').textContent = 'Planning: resolving numbered scenes and asset references…';
+    const request = {
+      ...studioAutoStoryInput(),
+      replace_reviewed_assignments: $('#replaceReviewedAssignments').checked,
+      render_settings: studioRenderSettings(),
+    };
+    const preview = await api(`/studio/projects/${studioProject.id}/auto-story/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...request, preview_only: true }),
+    });
+    renderAutoStoryPlan(
+      preview.plan || [], preview.input_required || [], preview.ordering_note || '',
+    );
+    if (preview.scenes) {
+      studioScenes = preview.scenes;
+      renderStudioScenes();
+    }
+    if (preview.status === 'needs_input') {
+      $('#autoStoryInputStatus').textContent = 'Needs input: no render was started.';
+      studioAutoStoryWorkflow = false;
+      return;
+    }
+    if (preview.status !== 'preview') {
+      throw new Error('The server did not prepare a scene preview.');
+    }
+
+    $('#autoStoryInputStatus').textContent = 'Planning: preview ready; starting the local render…';
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const result = await api(`/studio/projects/${studioProject.id}/auto-story/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (result.plan) {
+      renderAutoStoryPlan(
+        result.plan, result.input_required || [], result.ordering_note || '',
+      );
+    }
+    if (result.scenes) {
+      studioScenes = result.scenes;
+      renderStudioScenes();
+    }
+    if (result.status === 'needs_input') {
+      $('#autoStoryInputStatus').textContent = 'Needs input: no render was started.';
+      studioAutoStoryWorkflow = false;
+      return;
+    }
+    if (result.status !== 'rendering' || !result.job) {
+      throw new Error('The server did not start a render job.');
+    }
+    $('#autoStoryInputStatus').textContent = 'Preparing: the scene plan is ready; the local render job has started.';
+    await monitorStudioRender(result.job);
+  } catch (e) {
+    if (e.status === 409 || e.message.includes('already queued or running')) {
+      studioAutoStoryWorkflow = false;
+      $('#autoStoryInputStatus').textContent = `Rendering: ${e.message}`;
+      await loadStudioJobStatus();
+      if (['queued', 'running'].includes(studioRenderJob?.status)) {
+        await monitorStudioRender(studioRenderJob);
+      }
+    } else if (e.status >= 400 && e.status < 500) {
+      studioAutoStoryWorkflow = false;
+      $('#autoStoryInputStatus').textContent = `Needs input: ${e.message}`;
+    } else {
+      studioAutoStoryWorkflow = false;
+      await loadStudioJobStatus();
+      const latest = studioRenderJob;
+      if (latest?.id && latest.id !== previousJobId &&
+          ['queued', 'running'].includes(latest.status)) {
+        studioAutoStoryWorkflow = true;
+        await monitorStudioRender(latest);
+      } else if (latest?.id && latest.id !== previousJobId &&
+                 latest.status === 'failed') {
+        $('#autoStoryInputStatus').textContent = `Failed: ${latest.error || e.message}`;
+      } else if (latest?.id && latest.id !== previousJobId &&
+                 latest.status === 'completed') {
+        $('#autoStoryInputStatus').textContent = 'Completed';
+      } else {
+        $('#autoStoryInputStatus').textContent =
+          `Could not start or verify render: ${e.message}`;
+      }
+      toast('Create Story Video failed: ' + e.message, 'error');
+    }
+  } finally {
+    button.dataset.running = 'false';
+    updateStudioRenderButton();
+  }
+}
+
+async function confirmStudioAutoReview() {
+  if (!studioProject || !studioAutoReviewSceneIds.length ||
+      studioAutoReviewSubmitting ||
+      !studioScenes.every(studioSceneIsReviewed) ||
+      !studioAutoReviewSceneIds.every(id => {
+        const scene = studioScenes.find(item => item.id === id);
+        return scene && studioSceneIsReviewed(scene);
+      })) return;
+  const button = $('#confirmAutoReviewBtn');
+  studioAutoReviewSubmitting = true;
+  button.disabled = true;
+  setStudioWorkflowStatus('matching', 'validating reviewed scene assignments');
+  try {
+    if (!await saveStudioStory()) {
+      throw new Error('Could not save story edits');
+    }
+    const result = await api(`/studio/projects/${studioProject.id}/auto-director/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assignments: Object.fromEntries(
+          studioScenes.map(scene => [scene.id, scene.media_id]),
+        ),
+        render_settings: studioRenderSettings(),
+      }),
+    });
+    studioScenes = result.scenes;
+    studioAutoReview = false;
+    studioAutoReviewSceneIds = [];
+    renderStudioScenes();
+    await monitorStudioRender(result.job);
+  } catch (e) {
+    setStudioWorkflowStatus('needs_review', e.message);
+    toast('Could not continue Auto Create: ' + e.message, 'error');
+    updateStudioRenderButton();
+  } finally {
+    studioAutoReviewSubmitting = false;
+    updateStudioRenderButton();
+  }
+}
+
+function moveStudioScene(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= studioScenes.length) return;
+  [studioScenes[index], studioScenes[target]] = [studioScenes[target], studioScenes[index]];
+  renderStudioScenes();
+}
+
+async function loadStudioProject(projectId) {
+  if (studioAutoStorySaveTimer) {
+    clearTimeout(studioAutoStorySaveTimer);
+    studioAutoStorySaveTimer = null;
+    if (studioProject) {
+      try {
+        await api(`/studio/projects/${studioProject.id}/auto-story/input`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(studioAutoStoryInput()),
+        });
+      } catch (e) {
+        $('#autoStoryInputStatus').textContent = `Could not save Auto Mode inputs: ${e.message}`;
+        toast('Could not save Auto Mode inputs before switching projects: ' + e.message, 'error');
+      }
+    }
+  }
+  if (!projectId) {
+    studioProject = null;
+    studioMedia = [];
+    studioScenes = [];
+    studioSuggestions = {};
+    studioAutoReview = false;
+    studioAutoReviewSceneIds = [];
+    studioAutoReviewSubmitting = false;
+    studioRenderJob = null;
+    studioAutoWorkflow = false;
+    studioAutoStoryWorkflow = false;
+    $('#masterStoryBrief').value = '';
+    $('#useUploadOrderFallback').checked = false;
+    $('#replaceReviewedAssignments').checked = false;
+    $('#autoStoryInputStatus').textContent = '';
+    renderAutoStoryPlan();
+    if (studioRenderTimer) clearInterval(studioRenderTimer);
+    $('#studioJobStatus').textContent = 'Select a project to see its render status.';
+    $('#studioJobStatus').dataset.status = 'idle';
+    $('#storyScript').value = '';
+    $('#studioVoiceoverEnabled').checked = false;
+    $('#studioCaptionsEnabled').checked = false;
+    updateStudioAudioControls();
+    renderStudioMedia();
+    renderSavedAutoStoryPlan();
+    return;
+  }
+  try {
+    const project = await api(`/studio/projects/${projectId}`);
+    studioProject = project;
+    studioMedia = project.media.map(item => ({
+      description: '',
+      keywords: [],
+      characters: [],
+      location: '',
+      mood: '',
+      technical_metadata: {},
+      ...item,
+    }));
+    $('#storyScript').value = project.story_script || '';
+    studioScenes = (project.scenes || []).map(scene => {
+      const approved = scene.approved ?? Boolean(scene.media_id);
+      return {
+        visual_description: '',
+        characters: [],
+        location: '',
+        mood: '',
+        intended_action: '',
+        assignment_source: 'manual',
+        ...scene,
+        characters: Array.isArray(scene.characters) ? scene.characters : [],
+        approved,
+        reviewed_media_id: scene.reviewed_media_id ??
+          (approved && !(scene.assignment_source === 'auto' && scene.match_basis)
+            ? scene.media_id : null),
+      };
+    });
+    studioSuggestions = {};
+    studioAutoReview = false;
+    studioAutoReviewSceneIds = [];
+    studioAutoReviewSubmitting = false;
+    $('#autoDirectorStatus').textContent = '';
+    $('#masterStoryBrief').value = project.master_story_brief || '';
+    const autoSettings = project.auto_mode_settings || {};
+    $('#useUploadOrderFallback').checked =
+      Boolean(autoSettings.use_upload_order_fallback);
+    $('#replaceReviewedAssignments').checked = false;
+    $('#adaptivePacing').checked = Boolean(autoSettings.adaptive_pacing);
+    $('#autoStoryInputStatus').textContent = '';
+    const audioSettings = project.audio_settings || {};
+    $('#studioVoiceoverEnabled').checked = Boolean(audioSettings.voiceover_enabled);
+    $('#studioCaptionsEnabled').checked = Boolean(audioSettings.captions_enabled);
+    $('#studioVoice').value = audioSettings.voice || 'en-US-AriaNeural';
+    $('#studioSpeechBuffer').value = audioSettings.speech_buffer ?? 0.5;
+    $('#studioCaptionSize').value = audioSettings.caption_size || 'medium';
+    $('#studioCaptionPosition').value = audioSettings.caption_position || 'lower';
+    const qualitySettings = project.quality_settings || {};
+    $('#imageMotion').value = String(qualitySettings.image_motion ?? true);
+    $('#sceneTransition').value = qualitySettings.transition || 'hard_cut';
+    $('#exportPreset').value = qualitySettings.export_preset ||
+      project.render_defaults.export_preset || 'legacy';
+    $('#qualitySettingsStatus').textContent = 'Quality options saved to this project.';
+    updateStudioAudioControls();
+    studioRenderJob = null;
+    studioAutoWorkflow = false;
+    studioAutoStoryWorkflow = false;
+    const fpsSelect = $('#renderFps');
+    const configuredFps = String(project.render_defaults.fps);
+    if (![...fpsSelect.options].some(option => option.value === configuredFps)) {
+      fpsSelect.add(new Option(`${configuredFps} FPS · configured`, configuredFps));
+    }
+    fpsSelect.value = configuredFps;
+    $('#renderSceneSeconds').value = project.render_defaults.seconds_per_scene;
+    localStorage.setItem(STUDIO_PROJECT_KEY, project.id);
+    $('#uploadNotice').textContent = '';
+    renderStudioMedia();
+    renderSavedAutoStoryPlan();
+    $('#uploadDropzone').classList.remove('disabled');
+    $('#mediaFiles').disabled = false;
+    await loadStudioJobStatus(project.id);
+  } catch (e) {
+    toast('Could not open project: ' + e.message, 'error');
+  }
+}
+
+async function loadStudioProjects(preferredId = localStorage.getItem(STUDIO_PROJECT_KEY)) {
+  studioProjects = await api('/studio/projects');
+  const select = $('#projectSelect');
+  select.innerHTML = studioProjects.length
+    ? studioProjects.map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('')
+    : '<option value="">No projects yet</option>';
+  const selected = studioProjects.some(project => project.id === preferredId)
+    ? preferredId : studioProjects[0]?.id || '';
+  select.value = selected;
+  await loadStudioProject(selected);
+  $('#mediaFiles').disabled = !selected;
+  $('#uploadDropzone').classList.toggle('disabled', !selected);
+}
+
+async function createStudioProject() {
+  const input = $('#projectName');
+  const name = input.value.trim();
+  if (!name) {
+    toast('Enter a project name first', 'error');
+    input.focus();
+    return;
+  }
+  $('#createProjectBtn').disabled = true;
+  try {
+    const project = await api('/studio/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    input.value = '';
+    await loadStudioProjects(project.id);
+    toast('Project created', 'success');
+  } catch (e) {
+    toast('Could not create project: ' + e.message, 'error');
+  } finally {
+    $('#createProjectBtn').disabled = false;
+  }
+}
+
+const STUDIO_MAX_FILE_SIZE = 200 * 1024 * 1024;
+const STUDIO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4']);
+
+async function uploadStudioFiles(fileList) {
+  if (!studioProject) {
+    toast('Create or open a project before uploading', 'error');
+    return;
+  }
+  for (const file of fileList) {
+    const ext = `.${file.name.split('.').pop().toLowerCase()}`;
+    if (!STUDIO_EXTENSIONS.has(ext)) {
+      toast(`${file.name}: unsupported file type`, 'error');
+      continue;
+    }
+    if (file.size > STUDIO_MAX_FILE_SIZE) {
+      toast(`${file.name}: exceeds the 200 MB limit`, 'error');
+      continue;
+    }
+    const notice = $('#uploadNotice');
+    notice.textContent = `Uploading ${file.name}…`;
+    const form = new FormData();
+    form.append('file', file, file.name);
+    try {
+      await api(`/studio/projects/${studioProject.id}/media`, { method: 'POST', body: form });
+      await loadStudioProject(studioProject.id);
+      notice.textContent = `${file.name} uploaded`;
+    } catch (e) {
+      notice.textContent = `${file.name}: ${e.message}`;
+      toast(`Upload failed: ${e.message}`, 'error');
+    }
+  }
+  $('#mediaFiles').value = '';
+}
+
+async function moveStudioMedia(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= studioMedia.length) return;
+  const reordered = [...studioMedia];
+  [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+  try {
+    await api(`/studio/projects/${studioProject.id}/media/order`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_ids: reordered.map(item => item.id) }),
+    });
+    studioMedia = reordered;
+    renderStudioMedia();
+  } catch (e) { toast('Could not reorder media: ' + e.message, 'error'); }
+}
+
+async function removeStudioMedia(item) {
+  if (!item || !confirm(`Remove ${item.name} from this project?`)) return;
+  try {
+    await api(`/studio/projects/${studioProject.id}/media/${item.id}`, { method: 'DELETE' });
+    await loadStudioProject(studioProject.id);
+    toast('Media removed', 'info');
+  } catch (e) { toast('Could not remove media: ' + e.message, 'error'); }
+}
+
+function exportVideoUrl(rel, endpoint = 'video') {
+  return `/api/${endpoint}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+async function loadStudioExports(preferredExportId = null) {
+  try {
+    const selectedExport = $('#exportSelect').value;
+    const previousUrl = selectedExport === ''
+      ? null : studioExports[Number(selectedExport)]?.video_url;
+    studioExports = await api('/studio/exports');
+    const select = $('#exportSelect');
+    select.innerHTML = studioExports.length
+      ? `<option value="">Select a completed video</option>` + studioExports.map((item, index) =>
+        `<option value="${index}">${esc(item.title)} · ${esc(item.date)}</option>`).join('')
+      : '<option value="">No completed MP4 videos yet</option>';
+    select.disabled = !studioExports.length;
+    const preferredIndex = studioExports.findIndex(item =>
+      (preferredExportId && item.id === preferredExportId) ||
+      (!preferredExportId && previousUrl && item.video_url === previousUrl));
+    if (preferredIndex >= 0) select.value = String(preferredIndex);
+    updateStudioExportActions();
+  } catch (e) {
+    $('#exportSelect').innerHTML = '<option value="">Could not load completed videos</option>';
+    $('#exportInfo').textContent = e.message;
+  }
+}
+
+function updateStudioExportActions() {
+  const selected = $('#exportSelect').value;
+  const item = selected === '' ? null : studioExports[Number(selected)];
+  const previewButton = $('#previewExportBtn');
+  const downloadButton = $('#downloadExportBtn');
+  previewButton.disabled = !item;
+  downloadButton.classList.toggle('disabled', !item);
+  downloadButton.setAttribute('aria-disabled', item ? 'false' : 'true');
+  if (item) {
+    $('#exportInfo').textContent = `${item.title} · ${item.channel} · ${item.date}`;
+    downloadButton.href = item.download_url || exportVideoUrl(item.rel, 'download');
+    downloadButton.download = 'video.mp4';
+  } else {
+    $('#exportInfo').textContent = studioExports.length
+      ? 'Choose a finished video to preview or download.'
+      : 'Completed MP4 files from the existing output library appear here.';
+    downloadButton.removeAttribute('href');
+  }
+}
+
+async function loadStudioJobStatus() {
+  const statusEl = $('#studioJobStatus');
+  if (!studioProject) {
+    statusEl.textContent = 'Select a project to see its render status.';
+    statusEl.dataset.status = 'idle';
+    return;
+  }
+  const projectId = studioProject.id;
+  try {
+    const latest = await api(`/studio/projects/${projectId}/render`);
+    if (studioProject?.id !== projectId) return;
+    studioRenderJob = latest.status === 'idle' ? null : latest;
+    const status = latest.status || 'idle';
+    const displayStatus = ['queued', 'running'].includes(status)
+      ? 'rendering' : status;
+    statusEl.dataset.status = displayStatus;
+    if (studioAutoWorkflow && status !== 'idle') {
+      const directorStatus = $('#autoDirectorStatus');
+      directorStatus.dataset.status = displayStatus;
+      directorStatus.textContent = `Auto Create Video ${displayStatus}${latest.error ? `: ${latest.error}` : ''}`;
+    }
+    if (studioAutoStoryWorkflow && status !== 'idle') {
+      const stage = {
+        preparing: 'Preparing',
+        synthesizing_voiceover: 'Synthesizing voiceover',
+        rendering: 'Rendering',
+        completed: 'Completed',
+        failed: 'Failed',
+      }[latest.stage] || displayStatus;
+      const details = latest.error ? `: ${latest.error}` :
+        latest.duration ? ` · ${Number(latest.duration).toFixed(1)} seconds` : '';
+      $('#autoStoryInputStatus').textContent = `${stage}${details}`;
+    }
+    if (status === 'idle') {
+      statusEl.textContent = 'No render has been started for this project.';
+    } else {
+        const extended = (latest.scene_timings || []).filter(timing => timing.extended)
+          .map(timing => `Scene ${timing.scene} ${Number(timing.requested_duration).toFixed(1)}s → ${Number(timing.output_duration).toFixed(1)}s for ${Number(timing.narration_duration).toFixed(1)}s speech`);
+        const timeline = latest.duration != null
+          ? ` · Actual ${Number(latest.duration).toFixed(1)}s`
+          : latest.estimated_duration != null
+            ? ` · Estimated ${Number(latest.estimated_duration).toFixed(1)}s`
+            : '';
+        const fileSize = latest.size_bytes
+          ? ` · ${(Number(latest.size_bytes) / (1024 * 1024)).toFixed(1)} MiB`
+          : '';
+        statusEl.textContent = `Render ${displayStatus}${latest.finished ? ` · finished ${latest.finished}` : ''}${timeline}${extended.length ? ` · ${extended.join('; ')}` : ''}${latest.error ? ` · ${latest.error}` : ''}`;
+        if (latest.duration != null && fileSize) statusEl.textContent += fileSize;
+    }
+    updateStudioRenderButton();
+    if (status === 'completed') loadStudioExports(latest.export_id);
+    if (['completed', 'failed', 'idle'].includes(status) && studioRenderTimer) {
+      clearInterval(studioRenderTimer);
+      studioRenderTimer = null;
+    }
+  } catch (e) {
+    statusEl.textContent = `Render status unavailable: ${e.message}`;
+    statusEl.dataset.status = 'failed';
+  }
+}
+
+async function loadStudio() {
+  try {
+    await Promise.all([loadStudioProjects(), loadStudioExports()]);
+  } catch (e) {
+    toast('Studio could not load: ' + e.message, 'error');
+  }
+}
+
+$('#createProjectBtn').addEventListener('click', createStudioProject);
+$('#projectName').addEventListener('keydown', event => {
+  if (event.key === 'Enter') createStudioProject();
+});
+$('#projectSelect').addEventListener('change', event => loadStudioProject(event.target.value));
+$('#mediaFiles').addEventListener('change', event => uploadStudioFiles(event.target.files));
+const uploadDropzone = $('#uploadDropzone');
+['dragenter', 'dragover'].forEach(eventName => uploadDropzone.addEventListener(eventName, event => {
+  event.preventDefault();
+  if (studioProject) uploadDropzone.classList.add('drag-over');
+}));
+['dragleave', 'drop'].forEach(eventName => uploadDropzone.addEventListener(eventName, event => {
+  event.preventDefault();
+  uploadDropzone.classList.remove('drag-over');
+}));
+uploadDropzone.addEventListener('drop', event => uploadStudioFiles(event.dataTransfer.files));
+$('#exportSelect').addEventListener('change', updateStudioExportActions);
+$('#buildStoryScenesBtn').addEventListener('click', buildStudioScenes);
+$('#saveStoryBtn').addEventListener('click', saveStudioStory);
+$('#autoArrangeBtn').addEventListener('click', autoArrangeStudioScenes);
+$('#autoCreateVideoBtn').addEventListener('click', autoCreateStudioVideo);
+$('#createStoryVideoBtn').addEventListener('click', createStudioStoryVideo);
+$('#confirmAutoReviewBtn').addEventListener('click', confirmStudioAutoReview);
+$$('[data-studio-mode]').forEach(button => button.addEventListener('click', () =>
+  setStudioMode(button.dataset.studioMode)));
+$('#masterStoryBrief').addEventListener('input', () => {
+  $('#autoStoryInputStatus').textContent = 'Saving Master Story Brief…';
+  renderAutoStoryPlan();
+  scheduleStudioAutoStorySave();
+});
+$('#useUploadOrderFallback').addEventListener('change', scheduleStudioAutoStorySave);
+$('#adaptivePacing').addEventListener('change', scheduleStudioAutoStorySave);
+$('#storyScript').addEventListener('input', updateStudioStoryEstimate);
+$('#renderSceneSeconds').addEventListener('input', updateStudioStoryEstimate);
+['imageMotion', 'sceneTransition', 'exportPreset'].forEach(id =>
+  $(`#${id}`).addEventListener('change', saveStudioQualitySettings));
+$('#studioVoiceoverEnabled').addEventListener('change', () => {
+  updateStudioAudioControls();
+  scheduleStudioAutoStorySave();
+});
+$('#studioCaptionsEnabled').addEventListener('change', () => {
+  updateStudioAudioControls();
+  scheduleStudioAutoStorySave();
+});
+['studioVoice', 'studioSpeechBuffer', 'studioCaptionSize', 'studioCaptionPosition']
+  .forEach(id => $(`#${id}`).addEventListener('change', scheduleStudioAutoStorySave));
+$('#previewExportBtn').addEventListener('click', () => {
+  const item = studioExports[Number($('#exportSelect').value)];
+  if (item) showStudioPreview(item.video_url || exportVideoUrl(item.rel), 'video', item.title);
+});
+$('#studioGenerateBtn').addEventListener('click', async () => {
+  if (!studioProject) return;
+  studioAutoWorkflow = false;
+  const seconds = Number($('#renderSceneSeconds').value);
+  if (!Number.isFinite(seconds) || seconds < 0.5 || seconds > 30) {
+    toast('Seconds per scene must be between 0.5 and 30', 'error');
+    return;
+  }
+  $('#studioGenerateBtn').disabled = true;
+  try {
+    if (!await saveStudioStory()) {
+      $('#studioGenerateBtn').disabled = false;
+      return;
+    }
+    const job = await api(`/studio/projects/${studioProject.id}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(studioRenderSettings()),
+    });
+    await monitorStudioRender(job);
+    toast('Local render queued', 'success');
+  } catch (e) {
+    $('#studioGenerateBtn').disabled = false;
+    toast('Could not start render: ' + e.message, 'error');
+  }
+});
+$$('[data-open-view]').forEach(button => button.addEventListener('click', () => navigateTo(button.dataset.openView)));
 
 // ════════════════════════════════════════════════════════
 // DASHBOARD
@@ -612,6 +1878,7 @@ async function loadKeyPanel() {
 // VIEW REGISTRY + BOOT
 // ════════════════════════════════════════════════════════
 VIEWS.dashboard = loadDashboard;
+VIEWS.studio    = loadStudio;
 VIEWS.generate  = renderGenChannelPicker;
 VIEWS.library   = loadLibraryData;
 VIEWS.channels  = renderChannels;
@@ -620,9 +1887,14 @@ VIEWS.settings  = () => loadCfgEditor(activeCfg);
 
 (async () => {
   channelData = await api('/channels').catch(() => []);
+  loadStudio();
   loadDashboard();
   loadLibraryData();
   setInterval(() => {
+    if ($('#view-studio').classList.contains('active')) {
+      loadStudioExports();
+      if (studioProject && !studioRenderTimer) loadStudioJobStatus();
+    }
     if ($('#view-dashboard').classList.contains('active')) loadDashboard();
     if (activeJobId) {/* polling already running */}
   }, 8000);

@@ -19,3 +19,6 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 
 # ffmpeg is a SYSTEM dependency — installed via scripts/install_mac.sh (brew install ffmpeg)
+
+# Compatible with faster-whisper 1.2.1
+av==18.1.0

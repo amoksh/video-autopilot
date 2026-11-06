@@ -10,7 +10,7 @@ llm:
   #   FREE  openrouter many free models — model: meta-llama/llama-3.1-8b-instruct:free
   #   FREE  gemini     Google free tier — model: gemini-flash-latest (auto-tracks newest flash)
   provider: gemini
-  model: gemini-flash-latest
+  model: gemini-3.1-flash-lite
   temperature: 0.9             # higher = more creative hooks
 
 tts:
@@ -23,7 +23,7 @@ tts:
   elevenlabs_stability: 0.4
 
 visuals:
-  provider: pexels             # pexels (free stock) | fal | replicate (AI images)
+  provider: local             # pexels (free stock) | fal | replicate (AI images)
   clips_per_video: 12          # ~1 visual per 2–3s of a 25–35s video
   orientation: portrait        # portrait b-roll for 9:16
   ai_image_style: "cinematic, high detail, dramatic lighting, vertical 9:16"

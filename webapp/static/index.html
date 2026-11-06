@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>Video Autopilot</title>
+  <title>Video Autopilot Studio</title>
   <link rel="stylesheet" href="styles.css"/>
 </head>
 <body>
@@ -17,7 +17,11 @@
       <div class="brand-text">Video<span>Autopilot</span></div>
     </div>
     <nav class="sidebar-nav">
-      <a class="nav-item active" data-view="dashboard">
+      <a class="nav-item active" data-view="studio">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M9 5v14M15 5v14M4 10h5m6 0h5M4 15h5m6 0h5"/></svg>
+        <span>Studio</span>
+      </a>
+      <a class="nav-item" data-view="dashboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <span>Dashboard</span>
       </a>
@@ -49,8 +53,231 @@
   <!-- ── MAIN ── -->
   <main class="main-content">
 
+    <!-- VIDEO AUTOPILOT STUDIO -->
+    <section class="view active" id="view-studio">
+      <div class="page-header studio-header">
+        <div>
+          <div class="studio-eyebrow"><span class="live-dot"></span> PRIVATE WORKSPACE</div>
+          <h1>Video Autopilot Studio</h1>
+          <p class="page-sub">Bring your media together. Preview, organize, and download your finished videos.</p>
+        </div>
+        <span class="studio-local-badge">Stored locally</span>
+      </div>
+
+      <div class="studio-projectbar card">
+        <div class="project-heading">
+          <div class="studio-kicker">WORKSPACE</div>
+          <h2>New Project</h2>
+        </div>
+        <label class="sr-only" for="projectName">Project name</label>
+        <input id="projectName" class="studio-input" maxlength="80" placeholder="Give your project a name" autocomplete="off"/>
+        <button class="btn-primary" id="createProjectBtn">Create project</button>
+        <label class="studio-project-select-label" for="projectSelect">Open project</label>
+        <select id="projectSelect" class="select-sm" aria-label="Select project">
+          <option value="">No projects yet</option>
+        </select>
+      </div>
+
+      <div class="studio-layout">
+        <div class="studio-main-column">
+          <section class="card studio-upload-card">
+            <div class="card-head">
+              <div><div class="studio-kicker">01 / ADD YOUR ASSETS</div><h3>Media upload</h3></div>
+              <span class="studio-limit">JPG · PNG · WEBP · MP4 <span>up to 200 MB each · 2 GB / 100 files per project</span></span>
+            </div>
+            <label class="upload-dropzone" id="uploadDropzone" for="mediaFiles">
+              <input id="mediaFiles" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4" multiple hidden/>
+              <span class="upload-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M20 16.5v2A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-2"/></svg></span>
+              <strong>Drop your files here, or <span>browse</span></strong>
+              <small>Your uploads stay in this project on this Codespace.</small>
+            </label>
+            <div class="studio-notice" id="uploadNotice" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="card studio-library-card">
+            <div class="card-head">
+              <div><div class="studio-kicker">02 / YOUR PROJECT</div><h3>Media library <span id="mediaCount" class="count-pill">0</span></h3></div>
+              <span class="studio-sort-hint">Use arrows to set clip order</span>
+            </div>
+            <div class="studio-media-grid" id="studioMediaGrid">
+              <div class="studio-empty">Create or open a project to start adding media.</div>
+            </div>
+          </section>
+
+          <section class="card studio-generate-card">
+            <div class="card-head">
+              <div><div class="studio-kicker">03 / RENDER YOUR PROJECT</div><h3>Generate video</h3></div>
+              <span class="studio-sort-hint">Auto or manual workflow</span>
+            </div>
+            <div class="studio-mode-tabs" role="tablist" aria-label="Studio mode">
+              <button class="studio-mode-tab active" id="manualModeTab" type="button" role="tab"
+                aria-selected="true" aria-controls="studioManualModePanel" data-studio-mode="manual">Manual Mode</button>
+              <button class="studio-mode-tab" id="autoModeTab" type="button" role="tab"
+                aria-selected="false" aria-controls="studioAutoModePanel" data-studio-mode="auto">Auto Mode</button>
+            </div>
+            <section id="studioAutoModePanel" class="studio-auto-mode-panel" role="tabpanel"
+              aria-labelledby="autoModeTab" hidden>
+              <label class="studio-story-label" for="masterStoryBrief">Master Story Brief</label>
+              <textarea id="masterStoryBrief" class="studio-input studio-story-script" rows="9" maxlength="50000"
+                placeholder="Tell the complete story in one brief. You may label Story, Narration, Characters, Locations, Visual directions, Mood, Keywords, and Ordering. For scene-by-scene instructions use 1. ..., 2. ... and optionally include “Asset: 2” or an exact uploaded filename."></textarea>
+              <p class="studio-story-note">Numbered scene order and explicit asset references are followed. Without numbered scenes, paragraphs and sentences become a transparent sequence-based plan. No visual understanding is performed.</p>
+              <label class="studio-auto-option">
+                <input id="useUploadOrderFallback" type="checkbox"/>
+                <span><strong>Use upload order</strong><small>For scenes that cannot be matched to saved text metadata, assign uploads in their listed order. Reuse only when there are more scenes than uploads.</small></span>
+              </label>
+              <label class="studio-auto-option">
+                <input id="replaceReviewedAssignments" type="checkbox"/>
+                <span><strong>Replace reviewed manual assignments</strong><small>Only needed when this brief changes a scene with an existing reviewed manual clip assignment.</small></span>
+              </label>
+              <label class="studio-auto-option">
+                <input id="adaptivePacing" type="checkbox"/>
+                <span><strong>Adaptive pacing</strong><small>Uses measured narration with a conservative 2.5–6 second visual recommendation. Longer speech and chosen scene durations are never shortened; this is a timing rule, not AI editing judgment.</small></span>
+              </label>
+              <div id="autoStoryInputStatus" class="studio-auto-status" role="status" aria-live="polite"></div>
+              <div id="autoStoryPlan" class="studio-auto-plan" aria-live="polite"></div>
+              <button class="btn-primary studio-create-story-button" id="createStoryVideoBtn" type="button" disabled>Create Story Video</button>
+            </section>
+            <div id="studioManualModePanel" role="tabpanel" aria-labelledby="manualModeTab">
+            <div class="studio-story-editor">
+              <label class="studio-story-label" for="storyScript">Story script</label>
+              <textarea id="storyScript" class="studio-input studio-story-script" rows="5"
+                placeholder="Write one scene per line or paragraph. Scene text is saved with this project."></textarea>
+              <div class="studio-story-actions">
+                <button class="btn-ghost btn-sm" id="buildStoryScenesBtn" type="button">Build scene blocks</button>
+                <button class="btn-ghost btn-sm" id="saveStoryBtn" type="button" disabled>Save story</button>
+              </div>
+              <p class="studio-story-note">Edit each scene and its optional visual description, characters, location, mood, and intended action. Matching below uses text metadata only.</p>
+              <div id="studioRenderClipList" class="studio-render-clips">
+                <div class="studio-empty">Build scene blocks from a script, or leave the script empty for media-only rendering.</div>
+              </div>
+              <div class="studio-story-total" id="storyDurationEstimate">Estimated output duration: 0.0 seconds</div>
+            </div>
+            <section class="studio-auto-director" aria-labelledby="autoDirectorHeading">
+              <div class="studio-audio-heading">
+                <div><div class="studio-kicker">AUTO DIRECTOR</div><h4 id="autoDirectorHeading">Script-to-clip suggestions</h4></div>
+                <span class="studio-sort-hint">Local · deterministic</span>
+              </div>
+              <p class="studio-story-note">Matches saved descriptions, keywords, characters, location, mood, and scene text using deterministic text overlap. Scores are heuristic, not visual or AI understanding; FFmpeg thumbnails are previews only. Automatic visual descriptions of unseen footage are NOT IMPLEMENTED. Auto Create assigns only clear matches; uncertain scenes stay unassigned until confirmed.</p>
+              <button class="btn-ghost btn-sm" id="autoArrangeBtn" type="button" disabled>Auto Arrange</button>
+              <div class="studio-auto-status" id="autoDirectorStatus" role="status" aria-live="polite"></div>
+              <button class="btn-primary btn-sm studio-review-confirm" id="confirmAutoReviewBtn" type="button" hidden disabled>Confirm selections &amp; continue to render</button>
+            </section>
+            </div>
+            <section class="studio-audio-panel" aria-labelledby="studioAudioHeading">
+              <div class="studio-audio-heading">
+                <div><div class="studio-kicker">AUDIO &amp; CAPTIONS</div><h4 id="studioAudioHeading">Optional narration</h4></div>
+                <span class="studio-sort-hint">Saved per project</span>
+              </div>
+              <div class="studio-audio-options">
+                <label class="studio-audio-toggle"><input id="studioVoiceoverEnabled" type="checkbox"/> Enable Voiceover</label>
+                <label class="studio-audio-field">Edge TTS voice
+                  <select id="studioVoice" class="select-sm">
+                    <option value="en-US-AriaNeural">Aria · US English</option>
+                    <option value="en-US-GuyNeural">Guy · US English</option>
+                  </select>
+                </label>
+                <label class="studio-audio-field">Speech tail buffer
+                  <span><input id="studioSpeechBuffer" class="studio-input" type="number" min="0.1" max="3" step="0.1" value="0.5"/> sec</span>
+                </label>
+                <label class="studio-audio-toggle"><input id="studioCaptionsEnabled" type="checkbox"/> Enable Captions</label>
+                <label class="studio-audio-field">Caption size
+                  <select id="studioCaptionSize" class="select-sm">
+                    <option value="small">Small</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="large">Large</option>
+                  </select>
+                </label>
+                <label class="studio-audio-field">Caption position
+                  <select id="studioCaptionPosition" class="select-sm">
+                    <option value="lower" selected>Lower safe area</option>
+                    <option value="middle">Middle</option>
+                  </select>
+                </label>
+              </div>
+              <p class="studio-audio-note">Edge TTS requires internet and may be rate-limited; no paid fallback is used. Long captions wrap into two-line cards paced across the scene. Uploaded clip audio is removed; no music is mixed.</p>
+            </section>
+            <div class="studio-render-settings">
+              <label>Aspect ratio
+                <select id="renderAspectRatio" class="select-sm"><option value="9:16">9:16 vertical</option></select>
+              </label>
+              <label>Resolution
+                <input class="studio-input" value="1080 × 1920 · existing engine" readonly/>
+              </label>
+              <label>Frame rate
+                <select id="renderFps" class="select-sm">
+                  <option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option>
+                </select>
+              </label>
+              <label>Seconds per scene
+                <input id="renderSceneSeconds" class="studio-input" type="number" min="0.5" max="30" step="0.5" value="2.3"/>
+              </label>
+              <label>Export quality
+                <select id="exportPreset" class="select-sm">
+                  <option value="balanced" selected>Balanced</option>
+                  <option value="high_quality">High Quality</option>
+                  <option value="legacy">Existing (Legacy)</option>
+                </select>
+              </label>
+              <label>Image motion
+                <select id="imageMotion" class="select-sm">
+                  <option value="true" selected>On · subtle</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Scene transition
+                <select id="sceneTransition" class="select-sm">
+                  <option value="hard_cut" selected>Hard cut</option>
+                  <option value="crossfade">Crossfade · 0.4 sec</option>
+                </select>
+              </label>
+            </div>
+            <p class="studio-audio-note" id="qualitySettingsStatus">Quality options save per project. Crossfade requires voiceover and captions to be off.</p>
+            <div class="studio-workflow-actions">
+              <button class="btn-primary studio-generate-button" id="autoCreateVideoBtn" disabled>Run Auto Director</button>
+              <button class="btn-ghost studio-generate-button" id="studioGenerateBtn" disabled>Generate Video</button>
+            </div>
+            <p class="studio-audio-note">Voiceover narration uses each scene's text. Longer narration extends its scene and is reported in render status.</p>
+          </section>
+        </div>
+
+        <aside class="studio-side-column">
+          <section class="card studio-preview-card">
+            <div class="card-head">
+              <div><div class="studio-kicker">03 / PREVIEW</div><h3>Video preview</h3></div>
+              <span class="preview-dot">READY</span>
+            </div>
+            <div class="studio-preview-stage" id="studioPreviewStage">
+              <div class="studio-preview-empty"><span class="preview-play">▶</span><p>Select an uploaded clip or a finished video to preview.</p></div>
+            </div>
+            <div class="studio-preview-caption" id="previewCaption">Nothing selected</div>
+          </section>
+
+          <section class="card studio-export-card">
+            <div class="card-head">
+              <div><div class="studio-kicker">04 / FINISHED VIDEOS</div><h3>Export &amp; download</h3></div>
+            </div>
+            <label class="sr-only" for="exportSelect">Select a finished video</label>
+            <select id="exportSelect" class="select-sm studio-export-select">
+              <option value="">Looking for completed videos…</option>
+            </select>
+            <div class="studio-export-info" id="exportInfo">Completed MP4 files from the existing output library appear here.</div>
+            <div class="studio-export-actions">
+              <button class="btn-ghost btn-sm" id="previewExportBtn" disabled>Preview</button>
+              <a class="btn-primary btn-sm studio-download disabled" id="downloadExportBtn" aria-disabled="true">Download MP4</a>
+            </div>
+          </section>
+
+          <section class="card studio-render-card">
+            <div class="card-head"><div><div class="studio-kicker">RENDER STATUS</div><h3>Project render</h3></div><span class="render-disabled">Local FFmpeg</span></div>
+            <p>Renders run locally with the existing FFmpeg segment normalizer. No AI, external service, or publishing step is used.</p>
+            <div id="studioJobStatus" class="studio-job-status">Checking project render status…</div>
+          </section>
+        </aside>
+      </div>
+    </section>
+
     <!-- DASHBOARD -->
-    <section class="view active" id="view-dashboard">
+    <section class="view" id="view-dashboard">
       <div class="page-header">
         <div>
           <h1>Dashboard</h1>

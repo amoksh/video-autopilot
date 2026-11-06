@@ -64,11 +64,11 @@ def ffprobe_duration(path: Path) -> float:
     return float(out.stdout.strip())
 
 
-def run_ffmpeg(args: list[str]) -> None:
+def run_ffmpeg(args: list[str], cwd: Path | None = None) -> None:
     """Run ffmpeg quietly; raise with stderr tail on failure."""
     proc = subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
-        capture_output=True, text=True,
+        capture_output=True, text=True, cwd=cwd,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{proc.stderr[-1500:]}")

@@ -20,22 +20,26 @@ def synthesize(cfg: dict, text: str, out_dir: Path) -> Path:
     else:
         raise ValueError(f"Unknown tts.provider: {provider}")
 
-    # ── Broadcast voice-mastering chain (free, all in ffmpeg) ──
-    # speed-up → de-rumble → compress for consistent level → presence EQ →
-    # tame harsh sibilance → normalize to -16 LUFS (leaves headroom for music;
-    # the final mix is brought to platform -14 LUFS in assemble.py).
     speed = cfg["tts"].get("speed", 1.0)
-    chain = (
-        f"atempo={speed},"
-        "highpass=f=85,"                                  # cut low rumble/hum
-        "acompressor=threshold=-20dB:ratio=3.5:attack=5:release=140:makeup=3,"  # even, punchy level
-        "equalizer=f=180:t=q:w=1.0:g=-2,"                 # de-mud the low-mids
-        "equalizer=f=3200:t=q:w=1.6:g=3,"                 # presence/intelligibility lift
-        "treble=g=2:f=9000,"                              # subtle air
-        "deesser=i=0.35,"                                 # reduce harsh "s" sounds
-        "loudnorm=I=-16:TP=-1.5:LRA=11,"
-        "alimiter=limit=0.95"                             # safety ceiling, no clipping
-    )
+    if cfg["tts"].get("studio_safe_mastering"):
+        chain = (
+            f"atempo={speed},highpass=f=70,"
+            "loudnorm=I=-18:TP=-2:LRA=11,"
+            "alimiter=limit=0.8:attack=5:release=50:level=false"
+        )
+    else:
+        # Existing pipeline mastering remains unchanged.
+        chain = (
+            f"atempo={speed},"
+            "highpass=f=85,"
+            "acompressor=threshold=-20dB:ratio=3.5:attack=5:release=140:makeup=3,"
+            "equalizer=f=180:t=q:w=1.0:g=-2,"
+            "equalizer=f=3200:t=q:w=1.6:g=3,"
+            "treble=g=2:f=9000,"
+            "deesser=i=0.35,"
+            "loudnorm=I=-16:TP=-1.5:LRA=11,"
+            "alimiter=limit=0.95"
+        )
     run_ffmpeg([
         "-i", str(raw),
         "-filter:a", chain,

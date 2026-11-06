@@ -35,7 +35,19 @@ def gather_visuals(cfg: dict, script: dict, out_dir: Path, duration: float) -> l
     for i, q in enumerate(queries):
         dest = clips_dir / f"{i:02d}"
         try:
-            if provider == "pexels":
+            if provider == "local":
+                local_dir = Path("assets/local_visuals")
+                allowed = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
+                files = sorted(
+                    f for f in local_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in allowed
+                ) if local_dir.is_dir() else []
+                if not files:
+                    raise RuntimeError(
+                        "No local visuals found in assets/local_visuals"
+                    )
+                paths.append(files[i % len(files)])
+            elif provider == "pexels":
                 paths.append(_pexels_video(q, dest, cfg, used_ids))
             elif provider in ("fal", "replicate"):
                 paths.append(_ai_image(q, dest, cfg, provider))

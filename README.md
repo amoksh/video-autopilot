@@ -238,24 +238,142 @@ quality, voice, captions, and pacing. Tweak prompts in `config/prompts/` and set
 
 ## 7. The web dashboard
 
-Prefer clicking to typing? Launch the control panel:
+Launch the browser dashboard:
 
 ```bash
-bash scripts/serve.sh            # → http://127.0.0.1:8000
+bash scripts/serve.sh
 ```
+
+In GitHub Codespaces, open the forwarded port shown for `8000` (or your configured
+`PORT`) in the **Ports** tab. Keep the port visibility **Private**; this prototype
+is intended for a private Codespace, not public deployment. The dashboard itself
+does not require API keys.
+
+The Codespaces `postStartCommand` starts the existing dashboard automatically and
+opens its privately forwarded port in the browser. Startup output is saved to
+`.codespaces/server.log`. This hook does not install dependencies: set up the
+existing Python environment before starting the dashboard. Apply `.devcontainer`
+configuration changes to an existing Codespace with **Rebuild Container**. A
+stopped Codespace still needs to be resumed manually from GitHub.
+
+The default **Studio** view lets you create local projects, upload and organize JPG,
+PNG, WEBP, and MP4 media (up to 200 MB per file), preview clips, and play/download
+completed MP4s already in `output/`. Uploads are stored under the matching project
+in `output/studio_projects/`. **Generate Video** assembles the selected project's
+clips in saved order using the existing local FFmpeg segment normalizer at 1080×1920;
+no API keys, voiceover, or external services are used. Project renders are silent:
+audio from uploaded MP4 clips is removed, while the uploaded source files remain
+unchanged. Completed renders are stored under that project's `exports/` directory.
+The per-project quality controls retain the existing subtle still-image motion by
+default (or can turn it off) and keep **Hard cut** as the default transition.
+Optional 0.4-second crossfades are available only without voiceover or captions and
+are rejected for scenes marked with intended action, so narration, caption timing,
+and critical action boundaries are not silently overlapped.
+The Generate section also supports a saved story script: build one scene per line or
+paragraph, edit and reorder scenes, explicitly assign each scene's uploaded image/video,
+and set an individual duration. The displayed estimate sums scene durations. With no
+scene timeline, rendering retains the existing ordered-media mode and its shared duration.
+Auto Director adds editable clip descriptions, keywords, characters, locations, and moods,
+plus optional matching metadata for each story scene. **Auto Arrange** produces a stable,
+ranked text-overlap proposal with explainable heuristic scores; it remains a manual review
+tool. **Auto Create Video** saves the current metadata and story, creates scene blocks from
+the script when needed, assigns only clear high-confidence matches, and starts the existing
+render automatically when all scenes are safe. Uncertain scenes remain unassigned and show
+ranked grounded options; confirm the selected clips once to resume rendering. Existing
+assignments are preserved unless the user explicitly changes them. Matching is deterministic
+and text-only: automatic visual descriptions of unseen footage are **NOT IMPLEMENTED**.
+Local FFprobe extracts technical metadata and FFmpeg can create a representative MP4
+thumbnail; neither establishes clip meaning, and thumbnails do not affect match scores.
+Projects are limited to 100 media files, 200 MB per file, supported media dimensions, and
+the existing 600-second render duration.
+
+**Auto Mode** is a separate Studio tab using the same project uploads and FFmpeg renderer.
+Enter one Master Story Brief, optionally label Story, Narration, Characters, Locations,
+Visual directions, Mood, Keywords, and Ordering, then click **Create Story Video**. Numbered
+scene instructions preserve their entered order; otherwise paragraphs and sentences are
+split deterministically into sequence-based scenes. Explicit `Asset: 2` references or exact
+uploaded filenames are honored. Saved text metadata can produce explainable heuristic
+matches; it does not inspect footage. For unresolved scenes, select **Use upload order** to
+choose that disclosed fallback. The generated plan shows its actual mapping basis before
+rendering. A reviewed Manual Mode assignment is preserved unless **Replace reviewed manual
+assignments** is explicitly selected. Briefs, fallback preference, voice settings, and
+caption settings are saved per project. **Adaptive pacing** is an optional Auto Mode-only
+timing rule, defaulting off for older projects. When enabled with voiceover, it uses measured
+TTS duration and a conservative 2.5–6 second recommendation; scene durations explicitly
+chosen by the owner and longer narration still take precedence. It does not inspect footage
+or claim cinematic judgment. The existing 0.1–3 second speech-tail buffer remains selectable
+and saved with the audio settings. The job reports its effective post-TTS duration estimate,
+actual completed duration, narration-based scene extensions, and export size. TTS has no paid
+fallback and narration is never shortened to fit a scene.
+
+**Export quality** is saved per project. New projects start with **Balanced** (H.264
+`veryfast` CRF 23, AAC 160 kb/s); **High Quality** uses H.264 `fast` CRF 18 and AAC
+192 kb/s. Projects predating the preset retain **Existing (Legacy)** encoding
+(`ultrafast` CRF 20, AAC 192 kb/s) until the owner selects another preset. Encoding uses at
+most two threads for the new presets. Output remains H.264/AAC MP4 with `yuv420p` and
+faststart. Caption burn-in requires a final video encode; hard-cut silent renders retain the
+stream-copy concat path after per-scene normalization.
+
+Within that panel, **Audio & Captions** is optional and defaults off. Enable Voiceover to
+narrate each scene's edited text using the selected supported Edge TTS voice. This requires
+an internet connection to Microsoft's Edge speech service and may be throttled or
+unavailable; it is not guaranteed offline or unlimited. A service failure fails the render
+with a diagnostic; no paid provider is used as fallback. Narration is measured from the
+generated audio. If it exceeds the selected scene duration, that scene is extended by the
+configured speech-tail buffer (0.1–3 seconds; default 0.5) and the render status reports the
+adjusted scene timing.
+
+Enable Captions for readable, white, outlined scene-level subtitles burned into the video.
+Choose small, medium, or large text and a lower safe-area or middle position. The lower
+position places the text about 270 pixels above the bottom at 1080×1920, scaled for other
+vertical resolutions. Medium captions use a restrained 60-pixel font at 1080×1920 and a
+9% horizontal margin on each side. Captions wrap to at most two lines; longer scene text is shown in
+successive two-line cards over that scene's caption interval. This is scene-level pacing,
+not word-level synchronization. When voiceover is enabled, captions follow each generated
+narration's measured scene timing; without voiceover, they cover the configured scene
+duration. Both options and caption choices are saved per project; old projects default to
+medium, lower captions.
+Studio narration is normalized conservatively to -18 LUFS with a -2 dB true-peak target and
+a peak limiter. This does not change scene timing or add background music.
+Uploaded MP4 audio remains removed, and Studio does not add background music. Story renders
+are limited to 600 seconds total. Failed renders do not modify source media or prior exports.
+The existing Generate, Library, Channels, Guide, and Settings views remain available.
+
+For private Codespaces use, run `bash scripts/serve.sh` from the repository root, forward
+port `8000` (or your configured `PORT`) in the **Ports** tab, and keep visibility **Private**.
+To verify offline without making live TTS requests, run:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+The Auto Director tests cover ranked matching, metadata persistence, one-click render,
+uncertain-match review and resume, manual assignment preservation, and failed-render export
+preservation. The Studio integration tests synthesize local test tones in place of Edge TTS
+and check actual MP4 audio/video output, burned subtitle pixels, narration-based scene
+extension, and preview/download handlers. They do not verify Edge service availability. To use live
+narration, enable Voiceover in the Studio and render while Codespaces has internet access;
+service availability and rate limits are controlled externally.
+
+Auto Mode integration tests additionally cover four numbered scenes across mixed image/video
+uploads, explicit and saved-metadata mapping, upload-order fallback, missing/conflicting
+inputs, duplicate-job protection, voice/caption persistence, unchanged earlier exports, and
+a real vertical MP4 with preview and download endpoints. The automated voiceover is stubbed.
 
 | Tab | What it does |
 |-----|--------------|
+| **Studio** | Project media upload, ordering, local vertical rendering, preview and download |
 | **Dashboard** | Production stats, live activity feed, a "Get Started" setup checklist |
-| **Generate** | Pick a channel, set count/dry-run, hit start, watch logs + pipeline stages stream live |
+| **Generate** | Existing pipeline runner with live logs and pipeline stages |
 | **Library** | Play every generated video, search/filter by channel, view metadata, delete runs |
 | **Channels** | Every account's niche, cadence, platforms, and how many videos it's produced |
 | **Guide** | The complete playbook (niches, hooks, retention, monetization, compliance, FAQ) in-app |
 | **Settings** | Edit `settings.yaml` / `channels.yaml` in-browser (YAML-validated), see detected API keys |
 
-The sidebar shows green dots for which API keys are detected. The dashboard drives the **exact
-same pipeline** as the CLI — it shells out to `src.orchestrator` as background jobs and streams
-the logs back to your browser.
+The sidebar shows green dots for which API keys are detected. The existing Generate view drives
+the **exact same pipeline** as the CLI — it shells out to `src.orchestrator` as background jobs
+and streams the logs back to your browser. Studio renders use local FFmpeg only; uploaded
+MP4 source audio is removed in the output, and Studio does not publish videos.
 
 ---
 
