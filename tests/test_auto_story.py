@@ -35,7 +35,7 @@ def _make_mp4(path: Path, color: str) -> None:
     subprocess.run(
         [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", f"color=c={color}:s=64x64:r=12:d=1",
+            "-f", "lavfi", "-i", f"color=c={color}:s=64x64:r=12:d=10",
             "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
         ],
         check=True, capture_output=True,

@@ -1195,6 +1195,11 @@ body {
 .studio-scene-approval input { accent-color: #6f9cff; }
 .studio-scene-text { min-height: 52px; resize: vertical; font-size: 11px; line-height: 1.5; }
 .studio-scene-controls { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 9px; margin-top: 9px; }
+.studio-shot-editor { display: grid; gap: 8px; margin-top: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 7px; }
+.studio-shot-editor-heading { display: flex; justify-content: space-between; align-items: center; color: var(--text2); font-size: 10px; }
+.studio-shot-editor > small { color: var(--text3); line-height: 1.5; }
+.studio-shot-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto; align-items: end; gap: 8px; }
+.studio-shot-row .btn-ghost { white-space: nowrap; }
 .studio-scene-field .select-sm, .studio-scene-field .studio-input { width: 100%; min-width: 0; font-size: 10px; padding: 8px; }
 .studio-scene-duration span { display: flex; align-items: center; gap: 6px; color: var(--text3); }
 .studio-scene-metadata { margin-top: 9px; }
@@ -1937,6 +1942,8 @@ input, textarea, select { color-scheme: dark; }
   .studio-render-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .studio-workflow-actions { grid-template-columns: minmax(0, 1fr); }
   .studio-scene-controls { grid-template-columns: minmax(0, 1fr) 92px; }
+  .studio-shot-row { grid-template-columns: minmax(0, 1fr) 92px; }
+  .studio-shot-row .btn-ghost { grid-column: 1 / -1; justify-self: start; }
   .studio-scene-heading { flex-wrap: wrap; }
   .studio-scene-approval { order: 5; width: 100%; }
   .studio-scene-order { margin-left: auto; }

@@ -61,6 +61,18 @@ def _make_mp4(path: Path, color: str) -> None:
     )
 
 
+def _make_duration_mp4(path: Path, color: str, duration: float) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i",
+            f"color=c={color}:s=64x64:r=12:d={duration}",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
 def _make_sized_jpg(path: Path, color: str, size: str) -> None:
     subprocess.run(
         [
@@ -98,6 +110,137 @@ def _make_split_mp4(path: Path) -> None:
 
 
 class StoryTimelineIntegrationTest(unittest.TestCase):
+    def test_short_video_is_rejected_before_render_and_explicit_shots_cover_scene(self):
+        project_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            project_dir = projects_dir / project_id
+            project_dir.mkdir(parents=True)
+            video_path = project_dir / "short.mp4"
+            image_a = project_dir / "graphic-a.png"
+            video_b = project_dir / "video-b.mp4"
+            image_b = project_dir / "graphic-b.jpg"
+            _make_duration_mp4(video_path, "blue", 8)
+            _write_solid_png(image_a, (255, 0, 0))
+            _make_duration_mp4(video_b, "green", 12)
+            _make_jpg(image_b, "yellow")
+            media = [
+                {
+                    "id": uuid.uuid4().hex, "name": video_path.name,
+                    "extension": ".mp4", "file": video_path.name,
+                    "size": video_path.stat().st_size,
+                    "technical_metadata": {"duration_seconds": 8.0},
+                },
+                {
+                    "id": uuid.uuid4().hex, "name": image_a.name,
+                    "extension": ".png", "file": image_a.name,
+                    "size": image_a.stat().st_size,
+                },
+                {
+                    "id": uuid.uuid4().hex, "name": video_b.name,
+                    "extension": ".mp4", "file": video_b.name,
+                    "size": video_b.stat().st_size,
+                    "technical_metadata": {"duration_seconds": 12.0},
+                },
+                {
+                    "id": uuid.uuid4().hex, "name": image_b.name,
+                    "extension": ".jpg", "file": image_b.name,
+                    "size": image_b.stat().st_size,
+                },
+            ]
+            scene = {
+                "id": uuid.uuid4().hex, "text": "A long narrated scene.",
+                "media_id": media[0]["id"], "duration": 50.0,
+                "approved": True, "reviewed_media_id": media[0]["id"],
+            }
+            manifest_path = project_dir / "project.json"
+            manifest_path.write_text(json.dumps({
+                "id": project_id, "name": "Multi-shot coverage",
+                "created": "2026-01-01T00:00:00", "media": media,
+                "scenes": [scene],
+            }), encoding="utf-8")
+            with (
+                patch.object(server, "STUDIO_PROJECTS", projects_dir),
+                patch.object(server, "_validated_project_media", return_value=[
+                    video_path, image_a, video_b, image_b,
+                ]),
+                patch.object(server, "_render_studio_project") as worker,
+            ):
+                with self.assertRaises(HTTPException) as short_clip:
+                    server.render_studio_project(
+                        project_id, server.StudioRenderReq(fps=12),
+                    )
+                self.assertEqual(short_clip.exception.status_code, 400)
+                self.assertIn("42.00s", short_clip.exception.detail)
+                self.assertIn("Assign another uploaded shot", short_clip.exception.detail)
+                worker.assert_not_called()
+                self.assertFalse(server.STUDIO_RENDER_JOBS)
+
+                scene["shots"] = [
+                    {"media_id": media[0]["id"], "start": 0, "duration": 8},
+                    {"media_id": media[1]["id"], "start": 8, "duration": 15},
+                    {"media_id": media[2]["id"], "start": 23, "duration": 12},
+                    {"media_id": media[3]["id"], "start": 35, "duration": 15},
+                ]
+                scene["reviewed_shots"] = server._studio_shot_review_signature(scene)
+                manifest_path.write_text(json.dumps({
+                    "id": project_id, "name": "Multi-shot coverage",
+                    "created": "2026-01-01T00:00:00", "media": media,
+                    "scenes": [scene],
+                }), encoding="utf-8")
+                groups = server._studio_scene_shot_groups(
+                    [scene], media, [video_path, image_a, video_b, image_b], 12,
+                )
+                self.assertEqual(
+                    [shot["path"].name for shot in groups[0]],
+                    ["short.mp4", "graphic-a.png", "video-b.mp4", "graphic-b.jpg"],
+                )
+                self.assertEqual(
+                    [(shot["start"], shot["duration"]) for shot in groups[0]],
+                    [(0, 8), (8, 15), (23, 12), (35, 15)],
+                )
+                saved = server.save_studio_story(
+                    project_id,
+                    server.StudioStoryReq(
+                        script=scene["text"],
+                        scenes=[server.StudioSceneReq(**scene)],
+                    ),
+                )
+                self.assertEqual(
+                    [shot["media_id"] for shot in saved["scenes"][0]["shots"]],
+                    [item["id"] for item in media],
+                )
+                worker_started = threading.Event()
+                with patch.object(
+                    server, "_render_studio_project",
+                    side_effect=lambda *args: worker_started.set(),
+                ) as worker:
+                    job = server.render_studio_project(
+                        project_id, server.StudioRenderReq(fps=12),
+                    )
+                    self.assertTrue(worker_started.wait(5))
+                    worker_args = worker.call_args.args
+                    self.assertEqual(
+                        [path.name for path in worker_args[1]],
+                        ["short.mp4", "graphic-a.png", "video-b.mp4", "graphic-b.jpg"],
+                    )
+                    self.assertEqual(
+                        [[shot["start"] for shot in group]
+                         for group in worker_args[4]],
+                        [[0, 8, 23, 35]],
+                    )
+                    server.STUDIO_RENDER_JOBS.pop(job["id"], None)
+
+                scene.pop("shots")
+                scene["media_id"] = media[1]["id"]
+                legacy_image = server._studio_scene_shot_groups(
+                    [scene], media, [video_path, image_a, video_b, image_b], 12,
+                )
+                self.assertEqual(len(legacy_image[0]), 1)
+                self.assertEqual(legacy_image[0][0]["duration"], 50)
+                self.assertEqual(legacy_image[0][0]["path"].suffix, ".png")
+                self.assertIsNone(legacy_image[0][0]["available_duration"])
+
     def test_export_metrics_reject_incompatible_video_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "export.mp4"
@@ -669,7 +812,7 @@ class StoryTimelineIntegrationTest(unittest.TestCase):
                 directory / "green.jpg",
             ]
             _make_jpg(clips[0], "red")
-            _make_mp4(clips[1], "blue")
+            _make_duration_mp4(clips[1], "blue", 2)
             _make_jpg(clips[2], "green")
             output, duration = assemble_media_only(
                 clips, directory / "crossfade", 12, 1.5,

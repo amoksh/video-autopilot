@@ -327,6 +327,25 @@ def build_auto_story_plan(
     for index, source in enumerate(scenes):
         prior = existing[index] if index < len(existing) else {}
         prior_id = prior.get("media_id")
+        prior_shots = prior.get("shots", [])
+        if (not isinstance(prior_shots, list)
+                or any(not isinstance(shot, dict)
+                       or shot.get("media_id") not in media_by_id
+                       for shot in prior_shots)):
+            prior_shots = []
+        try:
+            has_matching_timing = (
+                abs(float(prior.get("duration")) - duration) < 1e-6
+                and abs(sum(float(shot["duration"]) for shot in prior_shots)
+                        - duration) < 1e-6
+            )
+        except (TypeError, ValueError, KeyError):
+            has_matching_timing = False
+        if (prior.get("text") != source["text"]
+                or prior.get("approved") is not True
+                or not prior.get("reviewed_shots")
+                or not has_matching_timing):
+            prior_shots = []
         is_reviewed_manual = (
             prior.get("assignment_source") == "manual"
             and prior.get("approved") is True
@@ -338,7 +357,14 @@ def build_auto_story_plan(
             "id": uuid.uuid4().hex,
             "scene_number": source["number"],
             "text": source["text"],
-            "media_id": None,
+            "media_id": (
+                prior_shots[0]["media_id"] if prior_shots
+                else None
+            ),
+            "shots": prior_shots,
+            "reviewed_shots": (
+                prior.get("reviewed_shots") if prior_shots else None
+            ),
             "reviewed_media_id": None,
             "duration": duration,
             "visual_description": source["visual_description"],
@@ -370,6 +396,9 @@ def build_auto_story_plan(
 
     for scene in plan:
         if scene["_explicit"]:
+            if (scene["shots"]
+                    and scene["shots"][0]["media_id"] != scene["_explicit"]):
+                scene["shots"] = []
             scene["media_id"] = scene["_explicit"]
             if scene["_reviewed"] == scene["_explicit"]:
                 scene["assignment_source"] = "manual"

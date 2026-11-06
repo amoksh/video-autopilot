@@ -47,7 +47,8 @@ def _export_encoding(export_preset: str) -> tuple[str, str, str, int]:
 def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int,
                       image_motion: bool = True,
                       encoding: Optional[tuple[str, str, str, int]] = None,
-                      aspect_ratio: str = "9:16") -> None:
+                      aspect_ratio: str = "9:16",
+                      loop_video: bool = True) -> None:
     """Scale+crop any image/video to an exact-length profile-sized segment.
 
     Still images optionally get a restrained zoom and pan. Every segment is bounded by an
@@ -85,11 +86,13 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},setsar=1,fps={fps}"
         )
-        args = [
-            "-stream_loop", "-1", "-i", str(src), "-vf", vf,
-            "-frames:v", str(frames), "-pix_fmt", "yuv420p",
-            "-an", str(dest),
-        ]
+        args = []
+        if loop_video:
+            args.extend(["-stream_loop", "-1"])
+        args.extend([
+            "-i", str(src), "-vf", vf, "-frames:v", str(frames),
+            "-pix_fmt", "yuv420p", "-an", str(dest),
+        ])
     if encoding is not None:
         preset, crf, _, threads = encoding
         args[-1:-1] = [
@@ -226,6 +229,16 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
         [math.ceil(duration * fps - 1e-9) / fps for duration in requested_durations]
         if scene_durations is not None else requested_durations
     )
+    for src, duration in zip(clips, durations):
+        if src.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            available = ffprobe_duration(src)
+            if duration > available + 1e-6:
+                uncovered = duration - available
+                raise ValueError(
+                    f"Video {src.name} is {available:.2f}s but its shot needs "
+                    f"{duration:.2f}s; {uncovered:.2f}s of visual coverage is "
+                    "uncovered. Assign more footage or shorten the scene."
+                )
     if any(duration > 600 for duration in durations):
         raise ValueError("Scene duration exceeds the 600-second render limit")
     if (not isinstance(image_motion, bool)
@@ -255,7 +268,7 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
         _normalize_segment(
             src, segment, duration, fps, index, image_motion,
             segment_encoding if export_preset != "legacy" else None,
-            profile.aspect_ratio,
+            profile.aspect_ratio, loop_video=False,
         )
         expected_frames = round(duration * fps)
         actual_frames = _video_frame_count(segment)

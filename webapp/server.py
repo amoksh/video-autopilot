@@ -134,12 +134,20 @@ class StudioMediaMetadataReq(BaseModel):
         return values
 
 
+class StudioShotReq(BaseModel):
+    media_id: str
+    start: float = Field(ge=0, le=600)
+    duration: float = Field(gt=0, le=600)
+
+
 class StudioSceneReq(BaseModel):
     id: str
     text: str
     media_id: Optional[str] = None
     reviewed_media_id: Optional[str] = None
-    duration: float = Field(ge=0.5, le=30)
+    reviewed_shots: Optional[str] = Field(default=None, max_length=16000)
+    duration: float = Field(ge=0.5, le=600)
+    shots: list[StudioShotReq] = Field(default_factory=list, max_length=100)
     visual_description: str = Field(default="", max_length=2000)
     characters: list[str] = Field(default_factory=list, max_length=30)
     location: str = Field(default="", max_length=300)
@@ -198,7 +206,7 @@ class StudioQualitySettings(BaseModel):
 
 class StudioRenderReq(StudioQualitySettings):
     fps: int = Field(default=30, ge=12, le=60)
-    seconds_per_scene: float = Field(default=2.3, ge=0.5, le=30)
+    seconds_per_scene: float = Field(default=2.3, ge=0.5, le=600)
     adaptive_pacing: bool = False
 
 
@@ -416,6 +424,146 @@ def _validated_project_media(project_id: str, manifest: dict) -> list[Path]:
     return validated
 
 
+def _studio_scene_shot_groups(
+    scenes: list[dict], media: list[dict], media_paths: list[Path], fps: int,
+) -> list[list[dict]]:
+    media_by_id = {
+        item["id"]: (item, path) for item, path in zip(media, media_paths)
+    }
+    groups = []
+    for scene_index, scene in enumerate(scenes, 1):
+        scene_duration = scene.get("duration")
+        if (isinstance(scene_duration, bool)
+                or not isinstance(scene_duration, (int, float))
+                or not math.isfinite(scene_duration) or scene_duration <= 0):
+            raise HTTPException(400, f"Scene {scene_index} has an invalid duration")
+        target_frames = math.ceil(scene_duration * fps - 1e-9)
+        raw_shots = scene.get("shots") or [{
+            "media_id": scene.get("media_id"),
+            "start": 0,
+            "duration": scene_duration,
+        }]
+        if not isinstance(raw_shots, list) or len(raw_shots) > MAX_STUDIO_MEDIA_COUNT:
+            raise HTTPException(400, f"Scene {scene_index} has an invalid shot list")
+
+        group = []
+        expected_start_frame = 0
+        for shot_index, shot in enumerate(raw_shots, 1):
+            if not isinstance(shot, dict):
+                raise HTTPException(400, f"Scene {scene_index} contains an invalid shot")
+            media_id = shot.get("media_id")
+            if media_id not in media_by_id:
+                raise HTTPException(
+                    400, f"Scene {scene_index}, shot {shot_index} references media "
+                    "outside this project"
+                )
+            start = shot.get("start")
+            duration = shot.get("duration")
+            if (isinstance(start, bool) or not isinstance(start, (int, float))
+                    or not math.isfinite(start) or start < 0
+                    or isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration) or duration <= 0):
+                raise HTTPException(
+                    400, f"Scene {scene_index}, shot {shot_index} has invalid timing"
+                )
+            start_frame = round(start * fps)
+            if (abs(start * fps - start_frame) > 1e-5
+                    or start_frame != expected_start_frame):
+                raise HTTPException(
+                    400, f"Scene {scene_index} shots must be ordered, contiguous, "
+                    "and start at 0 seconds"
+                )
+            shot_frames = math.ceil(duration * fps - 1e-9)
+            if shot_frames <= 0:
+                raise HTTPException(400, f"Scene {scene_index} has an empty shot")
+            aligned_duration = shot_frames / fps
+            item, path = media_by_id[media_id]
+            if item.get("extension", path.suffix).lower() == ".mp4":
+                technical = item.get("technical_metadata", {})
+                available = (
+                    technical.get("duration_seconds")
+                    if isinstance(technical, dict) else None
+                )
+                if (isinstance(available, bool)
+                        or not isinstance(available, (int, float))
+                        or not math.isfinite(available) or available <= 0):
+                    try:
+                        available = ffprobe_duration(path)
+                    except (OSError, subprocess.SubprocessError, ValueError) as error:
+                        raise HTTPException(
+                            400, f"Could not verify the duration of video "
+                            f"{item.get('name', path.name)}: {error}"
+                        ) from error
+                if aligned_duration > available + 0.001:
+                    uncovered = aligned_duration - available
+                    raise HTTPException(
+                        400,
+                        f"Scene {scene_index}, shot {shot_index}: "
+                        f"{item.get('name', path.name)} is {available:.2f}s but the "
+                        f"shot needs {aligned_duration:.2f}s; {uncovered:.2f}s of "
+                        "visual coverage is uncovered. Assign another uploaded shot "
+                        "or shorten the scene/narration.",
+                    )
+            group.append({
+                "path": path,
+                "media_id": media_id,
+                "start": start_frame / fps,
+                "duration": aligned_duration,
+                "explicit": bool(scene.get("shots")),
+                "available_duration": (
+                    float(available)
+                    if item.get("extension", path.suffix).lower() == ".mp4"
+                    else None
+                ),
+            })
+            expected_start_frame += shot_frames
+
+        if expected_start_frame != target_frames:
+            difference = abs(expected_start_frame - target_frames) / fps
+            if expected_start_frame < target_frames:
+                detail = f"{difference:.2f}s of scene time is uncovered"
+            else:
+                detail = f"shots exceed the scene by {difference:.2f}s"
+            raise HTTPException(
+                400,
+                f"Scene {scene_index} shot durations must exactly cover its "
+                f"{target_frames / fps:.2f}s narration timeline; {detail}. "
+                "Adjust the shot durations or scene duration.",
+            )
+        groups.append(group)
+    return groups
+
+
+def _studio_shot_review_signature(scene: dict) -> str:
+    shots = scene.get("shots")
+    if not isinstance(shots, list):
+        return "[]"
+    try:
+        scene_duration = float(scene.get("duration"))
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(scene_duration):
+        return ""
+    normalized = [f"{scene_duration:.6f}"]
+    for shot in shots:
+        if not isinstance(shot, dict):
+            return ""
+        try:
+            start = float(shot.get("start"))
+            duration = float(shot.get("duration"))
+        except (TypeError, ValueError):
+            return ""
+        if not math.isfinite(start) or not math.isfinite(duration):
+            return ""
+        normalized.append([
+            shot.get("media_id"),
+            f"{start:.6f}",
+            f"{duration:.6f}",
+        ])
+    return json.dumps(normalized, separators=(",", ":"))
+
+
 def _studio_technical_metadata(media_path: Path, extension: str) -> tuple[dict, str | None]:
     try:
         result = subprocess.run(
@@ -630,7 +778,8 @@ def _studio_export_metrics(video_path: Path, expected_duration: float,
 
 def _render_studio_project(job: StudioRenderJob, clips: list[Path],
                            scene_durations: Optional[list[float]] = None,
-                           scenes: Optional[list[dict]] = None) -> None:
+                           scenes: Optional[list[dict]] = None,
+                           scene_visuals: Optional[list[list[dict]]] = None) -> None:
     project_dir = _studio_project_dir(job.project_id)
     profile = get_output_profile(job.settings.aspect_ratio)
     exports_dir = project_dir / "exports"
@@ -698,9 +847,60 @@ def _render_studio_project(job: StudioRenderJob, clips: list[Path],
                 )
 
         job.stage = "rendering"
+        render_clips = clips
+        render_durations = effective_durations
+        if scene_visuals is not None and effective_durations is not None:
+            if len(scene_visuals) != len(effective_durations):
+                raise ValueError("Story shot groups do not match the narration scenes")
+            render_clips = []
+            render_durations = []
+            for scene_index, (group, scene_duration) in enumerate(
+                zip(scene_visuals, effective_durations), 1
+            ):
+                target_frames = round(scene_duration * job.settings.fps)
+                shots = [dict(shot) for shot in group]
+                if len(shots) == 1 and not shots[0]["explicit"]:
+                    shots[0]["start"] = 0
+                    shots[0]["duration"] = scene_duration
+
+                current_frame = 0
+                for shot_index, shot in enumerate(shots, 1):
+                    duration_frames = math.ceil(
+                        shot["duration"] * job.settings.fps - 1e-9
+                    )
+                    start_frame = round(shot["start"] * job.settings.fps)
+                    if start_frame != current_frame:
+                        raise ValueError(
+                            f"Scene {scene_index} shot {shot_index} is not "
+                            "contiguous with the previous shot"
+                        )
+                    if shot["available_duration"] is not None:
+                        aligned_duration = duration_frames / job.settings.fps
+                        if aligned_duration > shot["available_duration"] + 0.001:
+                            uncovered = aligned_duration - shot["available_duration"]
+                            raise ValueError(
+                                f"Scene {scene_index}, shot {shot_index} has "
+                                f"{uncovered:.2f}s of uncovered video. Assign another "
+                                "uploaded shot or shorten the scene/narration."
+                            )
+                    render_clips.append(shot["path"])
+                    render_durations.append(duration_frames / job.settings.fps)
+                    current_frame += duration_frames
+                if current_frame != target_frames:
+                    uncovered = abs(current_frame - target_frames) / job.settings.fps
+                    detail = (
+                        f"{uncovered:.2f}s is uncovered"
+                        if current_frame < target_frames
+                        else f"shots exceed the scene by {uncovered:.2f}s"
+                    )
+                    raise ValueError(
+                        f"Scene {scene_index} visual coverage does not match its "
+                        f"{scene_duration:.2f}s narration duration; {detail}. "
+                        "Adjust shot durations before rendering."
+                    )
         output_path, duration = assemble_media_only(
-            clips, staging_dir, job.settings.fps, job.settings.seconds_per_scene,
-            effective_durations, audio_path, captions_path,
+            render_clips, staging_dir, job.settings.fps, job.settings.seconds_per_scene,
+            render_durations, audio_path, captions_path,
             job.settings.image_motion, job.settings.transition,
             job.settings.export_preset,
             aspect_ratio=profile.aspect_ratio,
@@ -1194,23 +1394,40 @@ def save_studio_story(project_id: str, req: StudioStoryReq):
                 raise HTTPException(400, "Scene text cannot be empty")
             if len(scene.text) > 5000:
                 raise HTTPException(400, "Scene text must be 5000 characters or fewer")
-            if scene.media_id is not None and scene.media_id not in media_ids:
+            referenced_media_ids = (
+                [shot.media_id for shot in scene.shots]
+                if scene.shots else ([scene.media_id] if scene.media_id else [])
+            )
+            if any(media_id not in media_ids for media_id in referenced_media_ids):
                 raise HTTPException(400, "A scene references media outside this project")
             scene_ids.add(scene.id)
             saved_scene = scene.model_dump()
+            if scene.shots:
+                saved_scene["media_id"] = scene.shots[0].media_id
+            selected_media_id = saved_scene["media_id"]
             previous = existing_scenes.get(scene.id)
-            if scene.approved and scene.media_id:
+            if scene.shots:
+                shot_signature = _studio_shot_review_signature(saved_scene)
+                if scene.approved and scene.reviewed_shots == shot_signature:
+                    saved_scene["approved"] = True
+                    saved_scene["reviewed_media_id"] = selected_media_id
+                    saved_scene["reviewed_shots"] = shot_signature
+                else:
+                    saved_scene["approved"] = False
+                    saved_scene["reviewed_media_id"] = None
+                    saved_scene["reviewed_shots"] = None
+            elif scene.approved and selected_media_id:
                 # Legacy clients may omit the review marker. Only carry approval
                 # forward for the same saved choice; changed choices need review.
-                if scene.reviewed_media_id == scene.media_id:
-                    saved_scene["reviewed_media_id"] = scene.media_id
+                if scene.reviewed_media_id == selected_media_id:
+                    saved_scene["reviewed_media_id"] = selected_media_id
                 elif scene.assignment_source == "auto" and scene.match_basis:
                     saved_scene["reviewed_media_id"] = None
-                elif previous and previous.get("media_id") != scene.media_id:
+                elif previous and previous.get("media_id") != selected_media_id:
                     saved_scene["approved"] = False
                     saved_scene["reviewed_media_id"] = None
                 else:
-                    saved_scene["reviewed_media_id"] = scene.media_id
+                    saved_scene["reviewed_media_id"] = selected_media_id
             else:
                 saved_scene["approved"] = False
                 saved_scene["reviewed_media_id"] = None
@@ -1350,7 +1567,15 @@ def create_studio_auto_story(project_id: str, req: StudioAutoStoryReq):
         {
             "scene_number": scene["scene_number"],
             "text": scene["text"],
-            "asset_name": media_by_id.get(scene["media_id"], {}).get("name"),
+            "asset_name": (
+                " · ".join(
+                    f"{media_by_id.get(shot['media_id'], {}).get('name', 'Missing asset')} "
+                    f"({shot['start']:.2f}–{shot['start'] + shot['duration']:.2f}s)"
+                    for shot in scene.get("shots", [])
+                )
+                if scene.get("shots") else
+                media_by_id.get(scene["media_id"], {}).get("name")
+            ),
             "asset_id": scene["media_id"],
             "basis": scene["match_basis"] or "needs input",
             "details": scene["match_details"],
@@ -1732,8 +1957,31 @@ def remove_studio_media(project_id: str, media_id: str):
         manifest["media"] = [entry for entry in media
                              if not isinstance(entry, dict) or entry.get("id") != media_id]
         for scene in manifest.get("scenes", []):
-            if isinstance(scene, dict) and scene.get("media_id") == media_id:
+            if not isinstance(scene, dict):
+                continue
+            scene_shots = scene.get("shots", [])
+            affected = scene.get("media_id") == media_id or (
+                isinstance(scene_shots, list) and any(
+                    isinstance(shot, dict) and shot.get("media_id") == media_id
+                    for shot in scene_shots
+                )
+            )
+            if scene.get("media_id") == media_id:
                 scene["media_id"] = None
+            shots = scene.get("shots")
+            if isinstance(shots, list):
+                scene["shots"] = [
+                    shot for shot in shots
+                    if not isinstance(shot, dict) or shot.get("media_id") != media_id
+                ]
+                if scene.get("media_id") is None and scene["shots"]:
+                    first_shot = scene["shots"][0]
+                    if isinstance(first_shot, dict):
+                        scene["media_id"] = first_shot.get("media_id")
+            if affected:
+                scene["approved"] = False
+                scene["reviewed_media_id"] = None
+                scene["reviewed_shots"] = None
     _update_studio_manifest(project_id, remove)
     item = removed["item"]
     media_path = (_studio_project_dir(project_id) / item["file"]).resolve()
@@ -1786,15 +2034,25 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
             "Crossfade is disabled for scenes with intended-action notes; use hard cuts "
             "to keep action boundaries clear",
         )
+    if req.transition == "crossfade" and any(
+        isinstance(scene, dict)
+        and isinstance(scene.get("shots"), list)
+        and len(scene["shots"]) > 1
+        for scene in scenes
+    ):
+        raise HTTPException(
+            400,
+            "Crossfade is unavailable for multi-shot scenes because overlap shortens "
+            "their fixed timeline; use hard cuts.",
+        )
 
     scene_durations = None
     scene_data = None
+    scene_visuals = None
     if scenes:
         media_items = manifest.get("media", [])
-        media_by_id = {
-            item["id"]: path for item, path in zip(media_items, clips)
-        }
-        clips = []
+        if not isinstance(media_items, list) or len(media_items) != len(clips):
+            raise HTTPException(400, "Project media list is invalid")
         scene_durations = []
         scene_data = []
         for scene in scenes:
@@ -1804,19 +2062,32 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
                 raise HTTPException(
                     400, "Review and approve every scene assignment before rendering"
                 )
+            if (scene.get("shots")
+                    and scene.get("reviewed_shots")
+                    != _studio_shot_review_signature(scene)):
+                raise HTTPException(
+                    400, "Review and approve every shot assignment before rendering"
+                )
             media_id = scene.get("media_id")
-            if media_id not in media_by_id:
+            if not scene.get("shots") and media_id not in {
+                item.get("id") for item in media_items
+            }:
                 raise HTTPException(400, "Assign an uploaded clip or image to every story scene")
             duration = scene.get("duration")
             if (isinstance(duration, bool) or not isinstance(duration, (int, float))
-                    or not math.isfinite(duration) or not 0.5 <= duration <= 30):
+                    or not math.isfinite(duration) or not 0.5 <= duration <= 600):
                 raise HTTPException(400, "Project contains an invalid scene duration")
             text = scene.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > 5000:
                 raise HTTPException(400, "Project contains invalid scene text")
-            clips.append(media_by_id[media_id])
             scene_durations.append(float(duration))
             scene_data.append({"text": text})
+        scene_visuals = _studio_scene_shot_groups(
+            scenes, media_items, clips, req.fps,
+        )
+        clips = [
+            shot["path"] for group in scene_visuals for shot in group
+        ]
         if sum(scene_durations) > MAX_STUDIO_TOTAL_SECONDS:
             raise HTTPException(
                 400, f"Story timeline exceeds the {MAX_STUDIO_TOTAL_SECONDS}-second render limit"
@@ -1856,7 +2127,7 @@ def render_studio_project(project_id: str, req: StudioRenderReq):
         STUDIO_RENDER_JOBS[job.id] = job
         worker = threading.Thread(
             target=_render_studio_project,
-            args=(job, clips, scene_durations, scene_data), daemon=True,
+            args=(job, clips, scene_durations, scene_data, scene_visuals), daemon=True,
             name=f"studio-render-{job.id[:8]}",
         )
         try:

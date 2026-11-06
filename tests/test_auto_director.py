@@ -94,6 +94,7 @@ def _fixtures():
             "extension": ".mp4",
             "size": 1,
             "file": f"{clip['id']}.mp4",
+            "technical_metadata": {"duration_seconds": 60},
         }
         for clip in clips
     ]
@@ -443,6 +444,7 @@ class AutoDirectorTest(unittest.TestCase):
                     "file": media_path.name,
                     "description": "Quiet moment by a window",
                     "keywords": ["quiet", "window"],
+                    "technical_metadata": {"duration_seconds": 60},
                 }],
             }), encoding="utf-8")
             started = threading.Event()
@@ -515,6 +517,7 @@ class AutoDirectorTest(unittest.TestCase):
                 "extension": ".mp4",
                 "size": 7,
                 "file": f"{media_id}.mp4",
+                "technical_metadata": {"duration_seconds": 60},
             })
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -633,6 +636,7 @@ class AutoDirectorTest(unittest.TestCase):
                         "extension": ".mp4",
                         "size": 7,
                         "file": f"{media_id}.mp4",
+                        "technical_metadata": {"duration_seconds": 60},
                     } for media_id in media_ids],
                 }), encoding="utf-8")
 

@@ -274,7 +274,12 @@ are rejected for scenes marked with intended action, so narration, caption timin
 and critical action boundaries are not silently overlapped.
 The Generate section also supports a saved story script: build one scene per line or
 paragraph, edit and reorder scenes, explicitly assign each scene's uploaded image/video,
-and set an individual duration. The displayed estimate sums scene durations. With no
+and set an individual duration. Use **Add shot** to place explicitly selected uploads in
+ordered, timed positions within a narration scene; PNG/JPG/WEBP shots hold for their
+assigned duration. Video shots use only their available source footage and are never
+looped or stretched. A shortfall is reported with the uncovered time before rendering,
+and must be fixed by assigning additional footage or shortening the scene. Shot timing and
+selection require owner review. The displayed estimate sums scene durations. With no
 scene timeline, rendering retains the existing ordered-media mode and its shared duration.
 Auto Director adds editable clip descriptions, keywords, characters, locations, and moods,
 plus optional matching metadata for each story scene. **Auto Arrange** produces a stable,
@@ -298,9 +303,12 @@ split deterministically into sequence-based scenes. Explicit `Asset: 2` referenc
 uploaded filenames are honored. Saved text metadata can produce explainable heuristic
 matches; it does not inspect footage. For unresolved scenes, select **Use upload order** to
 choose that disclosed fallback. The generated plan shows its actual mapping basis before
-rendering. A reviewed Manual Mode assignment is preserved unless **Replace reviewed manual
-assignments** is explicitly selected. Briefs, fallback preference, voice settings, and
-caption settings are saved per project. **Adaptive pacing** is an optional Auto Mode-only
+rendering. Auto Mode never invents shot sequences: multi-shot assignments are explicit and
+must be reviewed in the scene editor; a matching reviewed sequence is preserved only when
+its narration and duration remain unchanged. A reviewed Manual Mode assignment is preserved
+unless **Replace reviewed manual assignments** is explicitly selected. Briefs, fallback
+preference, voice settings, and caption settings are saved per project. **Adaptive pacing**
+is an optional Auto Mode-only
 timing rule, defaulting off for older projects. When enabled with voiceover, it uses measured
 TTS duration and a conservative 2.5–6 second recommendation; scene durations explicitly
 chosen by the owner and longer narration still take precedence. It does not inspect footage

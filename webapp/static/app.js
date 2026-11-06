@@ -80,13 +80,30 @@ let studioAutoStoryWorkflow = false;
 let studioAutoStorySaveTimer = null;
 
 function studioSceneHasValidMedia(scene) {
-  return Boolean(scene.media_id && studioMedia.some(item => item.id === scene.media_id));
+  const shots = Array.isArray(scene.shots) ? scene.shots : [];
+  return shots.length
+    ? shots.every(shot => studioMedia.some(item => item.id === shot.media_id))
+    : Boolean(scene.media_id && studioMedia.some(item => item.id === scene.media_id));
+}
+
+function studioShotReviewSignature(scene) {
+  const shots = Array.isArray(scene.shots) ? scene.shots : [];
+  return JSON.stringify([
+    Number(scene.duration).toFixed(6),
+    ...shots.map(shot => [
+    shot.media_id,
+    Number(shot.start).toFixed(6),
+    Number(shot.duration).toFixed(6),
+    ]),
+  ]);
 }
 
 function studioSceneIsReviewed(scene) {
   return scene.approved === true &&
     studioSceneHasValidMedia(scene) &&
-    scene.reviewed_media_id === scene.media_id;
+    scene.reviewed_media_id === scene.media_id &&
+    (!scene.shots?.length ||
+      scene.reviewed_shots === studioShotReviewSignature(scene));
 }
 
 function mediaUrl(item) {
@@ -415,6 +432,26 @@ function renderStudioScenes() {
     const suggestionList = ranked.length
       ? `<div class="studio-suggestions"><div class="studio-kicker">${needsReview ? 'GROUNDED RANKED OPTIONS · SELECT FOR CONFIRMATION' : 'RANKED TEXT-METADATA SUGGESTIONS · SELECT TO ASSIGN'}</div>${suggestions}${!rankedOptions.length ? '<small>No grounded options are available. Add clip metadata or assign media manually.</small>' : ''}${!needsReview && ranked.length > 5 ? `<small>Showing top 5 of ${ranked.length} clips.</small>` : ''}</div>`
       : '';
+    const shots = Array.isArray(scene.shots) ? scene.shots : [];
+    let shotOffset = 0;
+    const shotRows = shots.map((shot, shotIndex) => {
+      const start = shotOffset;
+      shotOffset += Number(shot.duration) || 0;
+      const shotOptions = studioMedia.map(item =>
+        `<option value="${esc(item.id)}" ${item.id === shot.media_id ? 'selected' : ''}>${esc(item.name)} · ${item.extension === '.mp4' ? 'VIDEO' : 'IMAGE'}</option>`
+      ).join('');
+      return `<div class="studio-shot-row">
+        <label class="studio-scene-field">Shot ${shotIndex + 1} · ${start.toFixed(2)}–${shotOffset.toFixed(2)} sec
+          <select class="select-sm" data-shot-media="${index}:${shotIndex}">
+            <option value="">Select uploaded media</option>${shotOptions}
+          </select>
+        </label>
+        <label class="studio-scene-field">Shot duration
+          <span><input class="studio-input" data-shot-duration="${index}:${shotIndex}" type="number" min="0.1" max="600" step="0.1" value="${esc(shot.duration)}"/> sec</span>
+        </label>
+        <button class="btn-ghost btn-sm" type="button" data-shot-remove="${index}:${shotIndex}">Remove shot</button>
+      </div>`;
+    }).join('');
     return `<article class="studio-scene" data-scene-index="${index}">
       <div class="studio-scene-heading">
         <span class="studio-render-clip-index">${index + 1}</span>
@@ -436,8 +473,13 @@ function renderStudioScenes() {
           </select>
         </label>
         <label class="studio-scene-field studio-scene-duration">Duration
-          <span><input class="studio-input" data-scene-duration="${index}" type="number" min="0.5" max="30" step="0.1" value="${esc(scene.duration)}"/> sec</span>
+          <span><input class="studio-input" data-scene-duration="${index}" type="number" min="0.5" max="600" step="0.1" value="${esc(scene.duration)}"/> sec</span>
         </label>
+      </div>
+      <div class="studio-shot-editor">
+        <div class="studio-shot-editor-heading"><strong>Scene shots</strong><button class="btn-ghost btn-sm" type="button" data-shot-add="${index}">Add shot</button></div>
+        ${shots.length ? shotRows : '<small>Single-media scene. Add shots to explicitly assign multiple clips or graphics and set their durations.</small>'}
+        ${shots.length ? `<small>Ordered coverage: ${shotOffset.toFixed(2)} sec of ${Number(scene.duration).toFixed(2)} sec. Images hold for their shot duration; video is never looped.</small>` : ''}
       </div>
       <details class="studio-scene-metadata">
         <summary>Optional scene matching metadata</summary>
@@ -488,23 +530,100 @@ function renderStudioScenes() {
   $$('[data-scene-media]').forEach(select => select.addEventListener('change', () => {
     const index = Number(select.dataset.sceneMedia);
     studioScenes[index].media_id = select.value || null;
+    delete studioScenes[index].shots;
     studioScenes[index].assignment_source = 'manual';
     studioScenes[index].match_basis = null;
     studioScenes[index].match_details = '';
     studioScenes[index].approved = false;
     studioScenes[index].reviewed_media_id = null;
+    studioScenes[index].reviewed_shots = null;
     updateStudioRenderButton();
     renderStudioScenes();
   }));
   $$('[data-scene-duration]').forEach(input => input.addEventListener('input', () => {
     const index = Number(input.dataset.sceneDuration);
     const duration = Number(input.value);
-    if (Number.isFinite(duration) && duration >= 0.5 && duration <= 30) {
+    if (Number.isFinite(duration) && duration >= 0.5 && duration <= 600) {
       studioScenes[index].duration = duration;
+      studioScenes[index].approved = false;
+      studioScenes[index].reviewed_media_id = null;
+      studioScenes[index].reviewed_shots = null;
       input.closest('.studio-scene').querySelector('.studio-timeline-duration').textContent =
         `${duration.toFixed(1)} sec`;
+      const approval = input.closest('.studio-scene').querySelector('[data-scene-approved]');
+      if (approval) approval.checked = false;
       updateStudioStoryEstimate();
+      updateStudioRenderButton();
     }
+  }));
+  $$('[data-shot-add]').forEach(button => button.addEventListener('click', () => {
+    const index = Number(button.dataset.shotAdd);
+    const scene = studioScenes[index];
+    if (!Array.isArray(scene.shots)) {
+      scene.shots = scene.media_id
+        ? [{ media_id: scene.media_id, start: 0, duration: Number(scene.duration) }]
+        : [];
+    }
+    const previous = scene.shots[scene.shots.length - 1];
+    const transfer = previous
+      ? Math.min(1, Math.max((Number(previous.duration) || 0) - 0.1, 0))
+      : 0;
+    if (previous && transfer > 0) previous.duration -= transfer;
+    const nextStart = scene.shots.reduce(
+      (sum, shot) => sum + (Number(shot.duration) || 0), 0,
+    );
+    scene.shots.push({
+      media_id: '',
+      start: nextStart,
+      duration: transfer || Math.min(1, Number(scene.duration)),
+    });
+    scene.approved = false;
+    scene.reviewed_media_id = null;
+    scene.reviewed_shots = null;
+    renderStudioScenes();
+  }));
+  $$('[data-shot-remove]').forEach(button => button.addEventListener('click', () => {
+    const [sceneIndex, shotIndex] = button.dataset.shotRemove.split(':').map(Number);
+    const scene = studioScenes[sceneIndex];
+    scene.shots.splice(shotIndex, 1);
+    scene.shots.forEach((shot, index) => {
+      shot.start = scene.shots.slice(0, index).reduce(
+        (sum, previous) => sum + (Number(previous.duration) || 0), 0,
+      );
+    });
+    if (!scene.shots.length) delete scene.shots;
+    scene.media_id = scene.shots?.[0]?.media_id || null;
+    scene.approved = false;
+    scene.reviewed_media_id = null;
+    scene.reviewed_shots = null;
+    renderStudioScenes();
+  }));
+  $$('[data-shot-media]').forEach(select => select.addEventListener('change', () => {
+    const [sceneIndex, shotIndex] = select.dataset.shotMedia.split(':').map(Number);
+    const scene = studioScenes[sceneIndex];
+    scene.shots[shotIndex].media_id = select.value;
+    scene.media_id = scene.shots[0]?.media_id || null;
+    scene.assignment_source = 'manual';
+    scene.approved = false;
+    scene.reviewed_media_id = null;
+    scene.reviewed_shots = null;
+    renderStudioScenes();
+  }));
+  $$('[data-shot-duration]').forEach(input => input.addEventListener('change', () => {
+    const [sceneIndex, shotIndex] = input.dataset.shotDuration.split(':').map(Number);
+    const duration = Number(input.value);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 600) return;
+    const scene = studioScenes[sceneIndex];
+    scene.shots[shotIndex].duration = duration;
+    scene.shots.forEach((shot, index) => {
+      shot.start = scene.shots.slice(0, index).reduce(
+        (sum, previous) => sum + (Number(previous.duration) || 0), 0,
+      );
+    });
+    scene.approved = false;
+    scene.reviewed_media_id = null;
+    scene.reviewed_shots = null;
+    renderStudioScenes();
   }));
   $$('[data-scene-move]').forEach(button => button.addEventListener('click', () => {
     moveStudioScene(Number(button.dataset.sceneIndex), Number(button.dataset.sceneMove));
@@ -513,6 +632,8 @@ function renderStudioScenes() {
     const scene = studioScenes[Number(input.dataset.sceneApproved)];
     scene.approved = Boolean(input.checked && studioSceneHasValidMedia(scene));
     scene.reviewed_media_id = scene.approved ? scene.media_id : null;
+    scene.reviewed_shots = scene.approved && scene.shots?.length
+      ? studioShotReviewSignature(scene) : null;
     input.checked = studioSceneIsReviewed(scene);
     updateStudioRenderButton();
   }));
@@ -521,20 +642,24 @@ function renderStudioScenes() {
     if (!scene) return;
     if (button.dataset.reviewSuggest) {
       scene.media_id = button.dataset.suggestMedia;
+      delete scene.shots;
       scene.assignment_source = 'manual';
       scene.match_basis = null;
       scene.match_details = '';
       scene.approved = false;
       scene.reviewed_media_id = null;
+      scene.reviewed_shots = null;
       renderStudioScenes();
       return;
     }
     scene.media_id = button.dataset.suggestMedia;
+    delete scene.shots;
     scene.assignment_source = 'manual';
     scene.match_basis = null;
     scene.match_details = '';
     scene.approved = false;
     scene.reviewed_media_id = null;
+    scene.reviewed_shots = null;
     renderStudioScenes();
   }));
   updateStudioStoryEstimate();
@@ -550,6 +675,7 @@ function buildStudioScenes() {
       text,
       media_id: existing?.media_id || null,
       duration: existing?.duration || Number($('#renderSceneSeconds').value) || 2.3,
+      shots: existing?.shots || [],
       visual_description: existing?.visual_description || '',
       characters: existing?.characters || [],
       location: existing?.location || '',
