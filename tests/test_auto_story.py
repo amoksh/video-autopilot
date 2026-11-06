@@ -919,6 +919,73 @@ Mood: Quiet."""
             replacement.json()["plan"][0]["basis"], "numbered-order fallback",
         )
 
+    def test_numbered_order_reuse_saves_83_scenes_with_23_uploads(self):
+        manifest = server._studio_manifest(self.project_id)
+        media = []
+        project_dir = self.projects / self.project_id
+        for index in range(23):
+            media_id = uuid.uuid4().hex
+            filename = f"{media_id}.png"
+            (project_dir / filename).write_bytes(b"uploaded image fixture")
+            media.append({
+                "id": media_id,
+                "name": f"asset-{index + 1}.png",
+                "extension": ".png",
+                "file": filename,
+                "size": len(b"uploaded image fixture"),
+            })
+        manifest["media"] = media
+        server._save_studio_manifest(self.project_id, manifest)
+
+        brief = "\n".join(
+            f"{number}. A distinct narrated scene number {number}."
+            for number in range(1, 84)
+        )
+        request = self.create_request(
+            brief,
+            use_upload_order_fallback=True,
+            preview_only=True,
+        )
+        preview = self.client.post(
+            f"/api/studio/projects/{self.project_id}/auto-story/create",
+            json=request,
+        )
+        self.assertEqual(preview.status_code, 202, preview.text)
+        self.assertEqual(preview.json()["status"], "preview")
+        scenes = preview.json()["scenes"]
+        self.assertEqual(len(scenes), 83)
+        self.assertEqual(
+            [scene["media_id"] for scene in scenes[:23]],
+            [item["id"] for item in media],
+        )
+        self.assertFalse(any(scene["allow_reuse"] for scene in scenes[:23]))
+        self.assertTrue(all(scene["allow_reuse"] for scene in scenes[23:]))
+
+        saved = self.client.put(
+            f"/api/studio/projects/{self.project_id}/story",
+            json={
+                "script": "\n".join(scene["text"] for scene in scenes),
+                "scenes": scenes,
+                "audio_settings": request["audio_settings"],
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(len(saved.json()["scenes"]), 83)
+        self.assertEqual(
+            [scene["media_id"] for scene in saved.json()["scenes"]],
+            [scene["media_id"] for scene in scenes],
+        )
+        self.assertEqual(
+            [scene["text"] for scene in saved.json()["scenes"]],
+            [scene["text"] for scene in scenes],
+        )
+        self.assertTrue(all(
+            scene["allow_reuse"] for scene in saved.json()["scenes"][23:]
+        ))
+        saved_manifest = server._studio_manifest(self.project_id)
+        self.assertEqual(saved_manifest["media"], media)
+        self.assertEqual(saved.json()["audio_settings"], request["audio_settings"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -374,6 +374,7 @@ def build_auto_story_plan(
             "intended_action": source["intended_action"],
             "assignment_source": "auto",
             "approved": False,
+            "allow_reuse": False,
             "match_basis": None,
             "match_details": "",
             "_explicit": references[index],
@@ -454,6 +455,7 @@ def build_auto_story_plan(
             scene["media_id"] = media_id
             scene["match_basis"] = "numbered-order fallback"
             reused = sum(item["media_id"] == media_id for item in plan) > 1
+            scene["allow_reuse"] = reused
             scene["match_details"] = (
                 f"Upload-order fallback selected {media_by_id[media_id]['name']}."
                 + (" This upload is reused because the plan has more scenes than uploads."
