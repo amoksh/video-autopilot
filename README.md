@@ -256,7 +256,11 @@ existing Python environment before starting the dashboard. Apply `.devcontainer`
 configuration changes to an existing Codespace with **Rebuild Container**. A
 stopped Codespace still needs to be resumed manually from GitHub.
 
-The default **Studio** view lets you create local projects, upload and organize JPG,
+The default **Simple Studio** view provides five focused actions for uploading media,
+editing a story, creating a video, previewing/correcting, and downloading MP4s.
+**Advanced Studio** retains the full project media, scene, audio, quality, and rendering
+controls. Both use the same local projects and existing workflows. You can create local
+projects, upload and organize JPG,
 PNG, WEBP, and MP4 media (up to 200 MB per file), preview clips, and play/download
 completed MP4s already in `output/`. Uploads are stored under the matching project
 in `output/studio_projects/`. **Generate Video** assembles the selected project's
@@ -277,9 +281,12 @@ paragraph, edit and reorder scenes, explicitly assign each scene's uploaded imag
 and set an individual duration. Use **Add shot** to place explicitly selected uploads in
 ordered, timed positions within a narration scene; PNG/JPG/WEBP shots hold for their
 assigned duration. Video shots use only their available source footage and are never
-looped or stretched. A shortfall is reported with the uncovered time before rendering,
-and must be fixed by assigning additional footage or shortening the scene. Shot timing and
-selection require owner review. The displayed estimate sums scene durations. With no
+looped or stretched. Source start times are allocated from unused portions of each
+uploaded video across the whole project timeline; overlapping ranges and repeated still
+images are rejected unless the owner explicitly enables **Allow reuse**. A shortfall is
+reported with the missing time before video assembly and must be fixed by assigning
+additional footage or shortening the scene. Shot timing and selection require owner
+review. The displayed estimate sums scene durations. With no
 scene timeline, rendering retains the existing ordered-media mode and its shared duration.
 Auto Director adds editable clip descriptions, keywords, characters, locations, and moods,
 plus optional matching metadata for each story scene. **Auto Arrange** produces a stable,
@@ -374,7 +381,8 @@ a real vertical MP4 with preview and download endpoints. The automated voiceover
 
 | Tab | What it does |
 |-----|--------------|
-| **Studio** | Project media upload, ordering, local vertical rendering, preview and download |
+| **Simple Studio** | Focused project workflow for upload, story editing, video creation, preview and download |
+| **Advanced Studio** | Full project media, scene editing, audio, quality and rendering controls |
 | **Dashboard** | Production stats, live activity feed, a "Get Started" setup checklist |
 | **Generate** | Existing pipeline runner with live logs and pipeline stages |
 | **Library** | Play every generated video, search/filter by channel, view metadata, delete runs |

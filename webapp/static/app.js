@@ -14,7 +14,15 @@ async function api(path, opts = {}) {
   const r = await fetch('/api' + path, opts);
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const error = new Error(data.detail || `HTTP ${r.status}`);
+    const detail = data.detail;
+    const message = Array.isArray(detail)
+      ? detail.map(item => {
+        const location = Array.isArray(item.loc) ? item.loc.join('.') : '';
+        return `${location ? `${location}: ` : ''}${item.msg || 'Invalid value'}`;
+      }).join('; ')
+      : (typeof detail === 'string' ? detail
+        : detail ? JSON.stringify(detail) : `HTTP ${r.status}`);
+    const error = new Error(message);
     error.status = r.status;
     throw error;
   }
@@ -53,9 +61,13 @@ $$('.nav-item').forEach(item => {
 });
 
 function navigateTo(name) {
+  const studioMode = name === 'studio-advanced' ? 'advanced'
+    : name === 'studio' ? 'simple' : null;
+  const viewName = studioMode ? 'studio' : name;
   $$('.nav-item').forEach(i => i.classList.toggle('active', i.dataset.view === name));
-  $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
-  VIEWS[name]?.();
+  $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${viewName}`));
+  if (studioMode) setStudioNavigationMode(studioMode);
+  VIEWS[viewName]?.();
 }
 window.navigateTo = navigateTo;
 
@@ -79,6 +91,74 @@ let studioAutoWorkflow = false;
 let studioAutoStoryWorkflow = false;
 let studioAutoStorySaveTimer = null;
 
+const STUDIO_WORKSPACE_TITLES = {
+  upload: 'Upload Media',
+  story: 'Story & Script',
+  create: 'Create Video',
+  preview: 'Preview & Correct',
+  download: 'Download MP4',
+};
+
+function setStudioNavigationMode(mode) {
+  const view = $('#view-studio');
+  const advanced = mode === 'advanced';
+  view.classList.toggle('studio-advanced-mode', advanced);
+  view.classList.remove('studio-workspace-open');
+  view.removeAttribute('data-workspace');
+  $('#studioWorkspaceHeading').hidden = true;
+  $('#studioTitle').textContent = advanced ? 'Video Autopilot Studio' : 'Simple Studio';
+  $('#studioSubtitle').textContent = advanced
+    ? 'Full control over project media, scenes, rendering, and exports.'
+    : 'A focused workspace for your daily video production.';
+}
+
+function openStudioWorkspace(name) {
+  if (!STUDIO_WORKSPACE_TITLES[name]) return;
+  const view = $('#view-studio');
+  view.classList.remove('studio-advanced-mode');
+  view.classList.add('studio-workspace-open');
+  view.dataset.workspace = name;
+  $('#studioWorkspaceTitle').textContent = STUDIO_WORKSPACE_TITLES[name];
+  $('#studioWorkspaceHeading').hidden = false;
+  renderSimpleStudioSummary();
+}
+
+function setSimpleStudioMessage(message) {
+  $('#studioSimpleMessage').textContent = message || '';
+}
+
+function renderSimpleStudioSummary() {
+  const view = $('#view-studio');
+  const statusEl = $('#studioSimpleStatus');
+  const state = studioRenderJob?.status || 'idle';
+  const displayedState = ['queued', 'running'].includes(state)
+    ? 'rendering' : state;
+  statusEl.dataset.status = displayedState;
+  statusEl.textContent = displayedState;
+  const renderError = studioRenderJob?.error;
+  if (renderError) setSimpleStudioMessage(renderError);
+
+  const missingScene = studioScenes.some(scene => !studioSceneHasValidMedia(scene));
+  $('#studioSimpleWarning').textContent = !studioProject
+    ? ''
+    : !studioMedia.length
+      ? 'No footage uploaded yet. Upload media before creating a video.'
+      : missingScene
+        ? 'Missing footage: assign an uploaded clip or image to each story scene.'
+        : '';
+  $('#studioSimpleEmpty').hidden = Boolean(studioProject);
+  view.classList.toggle('studio-has-project', Boolean(studioProject));
+
+  const selectedExport = $('#exportSelect').value;
+  const selectedVideo = selectedExport === ''
+    ? null : studioExports[Number(selectedExport)];
+  $('#studioSimpleVideo').textContent = selectedVideo
+    ? selectedVideo.title
+    : studioExports.length
+      ? 'No completed MP4 selected.'
+      : 'No completed MP4 available yet.';
+}
+
 function studioSceneHasValidMedia(scene) {
   const shots = Array.isArray(scene.shots) ? scene.shots : [];
   return shots.length
@@ -90,10 +170,13 @@ function studioShotReviewSignature(scene) {
   const shots = Array.isArray(scene.shots) ? scene.shots : [];
   return JSON.stringify([
     Number(scene.duration).toFixed(6),
+    Boolean(scene.allow_reuse),
     ...shots.map(shot => [
-    shot.media_id,
-    Number(shot.start).toFixed(6),
-    Number(shot.duration).toFixed(6),
+      shot.media_id,
+      Number(shot.start).toFixed(6),
+      Number(shot.duration).toFixed(6),
+      shot.source_start == null ? null : Number(shot.source_start).toFixed(6),
+      shot.source_start_auto !== false,
     ]),
   ]);
 }
@@ -128,6 +211,7 @@ function renderStudioMedia() {
   $('#replaceReviewedAssignments').disabled = !studioProject;
   renderStudioScenes();
   updateStudioRenderButton();
+  renderSimpleStudioSummary();
   if (!studioProject) {
     grid.innerHTML = '<div class="studio-empty">Create or open a project to start adding media.</div>';
     return;
@@ -398,6 +482,7 @@ function renderStudioScenes() {
       : 'Build scene blocks from a script, or leave the script empty for media-only rendering.'}</div>`;
     updateStudioStoryEstimate();
     updateStudioRenderButton();
+    renderSimpleStudioSummary();
     return;
   }
   clipList.innerHTML = studioScenes.map((scene, index) => {
@@ -449,6 +534,10 @@ function renderStudioScenes() {
         <label class="studio-scene-field">Shot duration
           <span><input class="studio-input" data-shot-duration="${index}:${shotIndex}" type="number" min="0.1" max="600" step="0.1" value="${esc(shot.duration)}"/> sec</span>
         </label>
+        <label class="studio-scene-field">Source start
+          <span><input class="studio-input" data-shot-source-start="${index}:${shotIndex}" type="number" min="0" max="600" step="0.1" value="${shot.source_start == null ? '' : esc(shot.source_start)}" placeholder="Auto"/> sec</span>
+          <small>${shot.source_start_auto !== false ? 'Auto-selected unused footage' : 'Explicit source range'}</small>
+        </label>
         <button class="btn-ghost btn-sm" type="button" data-shot-remove="${index}:${shotIndex}">Remove shot</button>
       </div>`;
     }).join('');
@@ -476,6 +565,7 @@ function renderStudioScenes() {
           <span><input class="studio-input" data-scene-duration="${index}" type="number" min="0.5" max="600" step="0.1" value="${esc(scene.duration)}"/> sec</span>
         </label>
       </div>
+      <label class="studio-scene-approval"><input type="checkbox" data-scene-reuse="${index}" ${scene.allow_reuse ? 'checked' : ''}/> Allow reuse of media already used in this project</label>
       <div class="studio-shot-editor">
         <div class="studio-shot-editor-heading"><strong>Scene shots</strong><button class="btn-ghost btn-sm" type="button" data-shot-add="${index}">Add shot</button></div>
         ${shots.length ? shotRows : '<small>Single-media scene. Add shots to explicitly assign multiple clips or graphics and set their durations.</small>'}
@@ -554,6 +644,7 @@ function renderStudioScenes() {
       if (approval) approval.checked = false;
       updateStudioStoryEstimate();
       updateStudioRenderButton();
+      renderSimpleStudioSummary();
     }
   }));
   $$('[data-shot-add]').forEach(button => button.addEventListener('click', () => {
@@ -576,6 +667,8 @@ function renderStudioScenes() {
       media_id: '',
       start: nextStart,
       duration: transfer || Math.min(1, Number(scene.duration)),
+      source_start: null,
+      source_start_auto: true,
     });
     scene.approved = false;
     scene.reviewed_media_id = null;
@@ -602,9 +695,12 @@ function renderStudioScenes() {
     const [sceneIndex, shotIndex] = select.dataset.shotMedia.split(':').map(Number);
     const scene = studioScenes[sceneIndex];
     scene.shots[shotIndex].media_id = select.value;
+    scene.shots[shotIndex].source_start = null;
+    scene.shots[shotIndex].source_start_auto = true;
     scene.media_id = scene.shots[0]?.media_id || null;
     scene.assignment_source = 'manual';
     scene.approved = false;
+    scene.allow_reuse = false;
     scene.reviewed_media_id = null;
     scene.reviewed_shots = null;
     renderStudioScenes();
@@ -625,6 +721,29 @@ function renderStudioScenes() {
     scene.reviewed_shots = null;
     renderStudioScenes();
   }));
+  $$('[data-shot-source-start]').forEach(input =>
+    input.addEventListener('change', () => {
+      const [sceneIndex, shotIndex] = input.dataset.shotSourceStart.split(':').map(Number);
+      const scene = studioScenes[sceneIndex];
+      const sourceStart = input.value === '' ? null : Number(input.value);
+      if (sourceStart !== null &&
+          (!Number.isFinite(sourceStart) || sourceStart < 0 || sourceStart > 600)) return;
+      scene.shots[shotIndex].source_start = sourceStart;
+      scene.shots[shotIndex].source_start_auto = sourceStart === null;
+      scene.approved = false;
+      scene.reviewed_media_id = null;
+      scene.reviewed_shots = null;
+      renderStudioScenes();
+    }));
+  $$('[data-scene-reuse]').forEach(input =>
+    input.addEventListener('change', () => {
+      const scene = studioScenes[Number(input.dataset.sceneReuse)];
+      scene.allow_reuse = input.checked;
+      scene.approved = false;
+      scene.reviewed_media_id = null;
+      scene.reviewed_shots = null;
+      renderStudioScenes();
+    }));
   $$('[data-scene-move]').forEach(button => button.addEventListener('click', () => {
     moveStudioScene(Number(button.dataset.sceneIndex), Number(button.dataset.sceneMove));
   }));
@@ -695,10 +814,11 @@ function buildStudioScenes() {
 
 async function saveStudioStory() {
   if (!studioProject) return;
+  const projectId = studioProject.id;
   const saveButton = $('#saveStoryBtn');
   saveButton.disabled = true;
   try {
-    const result = await api(`/studio/projects/${studioProject.id}/story`, {
+    const result = await api(`/studio/projects/${projectId}/story`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -708,14 +828,16 @@ async function saveStudioStory() {
         master_story_brief: $('#masterStoryBrief').value,
       }),
     });
+    if (studioProject?.id !== projectId) return false;
     studioScenes = result.scenes;
     renderStudioScenes();
     return true;
   } catch (e) {
+    setSimpleStudioMessage(e.message);
     toast('Could not save story: ' + e.message, 'error');
     return false;
   } finally {
-    saveButton.disabled = !studioProject;
+    saveButton.disabled = !studioProject || studioProject.id !== projectId;
   }
 }
 
@@ -809,6 +931,7 @@ function setStudioWorkflowStatus(status, message) {
   const directorStatus = $('#autoDirectorStatus');
   directorStatus.dataset.status = status;
   directorStatus.textContent = `${status.replace('_', ' ')}: ${message}`;
+  setSimpleStudioMessage(message);
 }
 
 async function monitorStudioRender(job) {
@@ -884,6 +1007,7 @@ async function createStudioStoryVideo() {
   const brief = $('#masterStoryBrief').value.trim();
   if (!brief) {
     $('#autoStoryInputStatus').textContent = 'Needs input: enter a Master Story Brief.';
+    setSimpleStudioMessage('Enter a Master Story Brief.');
     $('#masterStoryBrief').focus();
     return;
   }
@@ -926,6 +1050,8 @@ async function createStudioStoryVideo() {
     }
     if (preview.status === 'needs_input') {
       $('#autoStoryInputStatus').textContent = 'Needs input: no render was started.';
+      setSimpleStudioMessage((preview.input_required || []).join('; ') ||
+        'The story plan needs additional input.');
       studioAutoStoryWorkflow = false;
       return;
     }
@@ -951,6 +1077,8 @@ async function createStudioStoryVideo() {
     }
     if (result.status === 'needs_input') {
       $('#autoStoryInputStatus').textContent = 'Needs input: no render was started.';
+      setSimpleStudioMessage((result.input_required || []).join('; ') ||
+        'The story plan needs additional input.');
       studioAutoStoryWorkflow = false;
       return;
     }
@@ -960,6 +1088,7 @@ async function createStudioStoryVideo() {
     $('#autoStoryInputStatus').textContent = 'Preparing: the scene plan is ready; the local render job has started.';
     await monitorStudioRender(result.job);
   } catch (e) {
+    setSimpleStudioMessage(e.message);
     if (e.status === 409 || e.message.includes('already queued or running')) {
       studioAutoStoryWorkflow = false;
       $('#autoStoryInputStatus').textContent = `Rendering: ${e.message}`;
@@ -1063,6 +1192,7 @@ async function loadStudioProject(projectId) {
   }
   if (!projectId) {
     studioProject = null;
+    setSimpleStudioMessage('');
     studioOutputProfiles = {};
     studioMedia = [];
     studioScenes = [];
@@ -1092,6 +1222,7 @@ async function loadStudioProject(projectId) {
   try {
     const project = await api(`/studio/projects/${projectId}`);
     studioProject = project;
+    setSimpleStudioMessage('');
     studioOutputProfiles = project.output_profiles || {};
     studioMedia = project.media.map(item => ({
       description: '',
@@ -1168,6 +1299,15 @@ async function loadStudioProject(projectId) {
     $('#mediaFiles').disabled = false;
     await loadStudioJobStatus(project.id);
   } catch (e) {
+    if (e.status === 404 && $('#projectSelect').value === projectId) {
+      if (localStorage.getItem(STUDIO_PROJECT_KEY) === projectId) {
+        localStorage.removeItem(STUDIO_PROJECT_KEY);
+      }
+      $('#projectSelect').value = '';
+      await loadStudioProject('');
+      toast('This project is no longer available on the server. Select an existing project or create a new one.', 'error');
+      return;
+    }
     toast('Could not open project: ' + e.message, 'error');
   }
 }
@@ -1315,6 +1455,7 @@ function updateStudioExportActions() {
       : 'Completed MP4 files from the existing output library appear here.';
     downloadButton.removeAttribute('href');
   }
+  renderSimpleStudioSummary();
 }
 
 async function loadStudioJobStatus() {
@@ -1322,6 +1463,7 @@ async function loadStudioJobStatus() {
   if (!studioProject) {
     statusEl.textContent = 'Select a project to see its render status.';
     statusEl.dataset.status = 'idle';
+    renderSimpleStudioSummary();
     return;
   }
   const projectId = studioProject.id;
@@ -1372,9 +1514,13 @@ async function loadStudioJobStatus() {
       clearInterval(studioRenderTimer);
       studioRenderTimer = null;
     }
+    renderSimpleStudioSummary();
   } catch (e) {
     statusEl.textContent = `Render status unavailable: ${e.message}`;
     statusEl.dataset.status = 'failed';
+    $('#studioSimpleStatus').dataset.status = 'unknown';
+    $('#studioSimpleStatus').textContent = 'status unavailable';
+    setSimpleStudioMessage(e.message);
   }
 }
 
@@ -1391,6 +1537,9 @@ $('#projectName').addEventListener('keydown', event => {
   if (event.key === 'Enter') createStudioProject();
 });
 $('#projectSelect').addEventListener('change', event => loadStudioProject(event.target.value));
+$$('[data-studio-workspace]').forEach(button => button.addEventListener('click', () =>
+  openStudioWorkspace(button.dataset.studioWorkspace)));
+$('#studioWorkspaceBack').addEventListener('click', () => navigateTo('studio'));
 $('#mediaFiles').addEventListener('change', event => uploadStudioFiles(event.target.files));
 const uploadDropzone = $('#uploadDropzone');
 ['dragenter', 'dragover'].forEach(eventName => uploadDropzone.addEventListener(eventName, event => {
@@ -1403,6 +1552,8 @@ const uploadDropzone = $('#uploadDropzone');
 }));
 uploadDropzone.addEventListener('drop', event => uploadStudioFiles(event.dataTransfer.files));
 $('#exportSelect').addEventListener('change', updateStudioExportActions);
+$('#studioPreviewEditStory').addEventListener('click', () =>
+  openStudioWorkspace('story'));
 $('#buildStoryScenesBtn').addEventListener('click', buildStudioScenes);
 $('#saveStoryBtn').addEventListener('click', saveStudioStory);
 $('#autoArrangeBtn').addEventListener('click', autoArrangeStudioScenes);
@@ -1445,6 +1596,7 @@ $('#studioGenerateBtn').addEventListener('click', async () => {
   studioAutoWorkflow = false;
   const seconds = Number($('#renderSceneSeconds').value);
   if (!Number.isFinite(seconds) || seconds < 0.5 || seconds > 30) {
+    setSimpleStudioMessage('Seconds per scene must be between 0.5 and 30.');
     toast('Seconds per scene must be between 0.5 and 30', 'error');
     return;
   }
@@ -1463,6 +1615,7 @@ $('#studioGenerateBtn').addEventListener('click', async () => {
     toast('Local render queued', 'success');
   } catch (e) {
     $('#studioGenerateBtn').disabled = false;
+    setSimpleStudioMessage(e.message);
     toast('Could not start render: ' + e.message, 'error');
   }
 });

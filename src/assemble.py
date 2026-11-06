@@ -48,7 +48,8 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
                       image_motion: bool = True,
                       encoding: Optional[tuple[str, str, str, int]] = None,
                       aspect_ratio: str = "9:16",
-                      loop_video: bool = True) -> None:
+                      loop_video: bool = True,
+                      source_start: float = 0.0) -> None:
     """Scale+crop any image/video to an exact-length profile-sized segment.
 
     Still images optionally get a restrained zoom and pan. Every segment is bounded by an
@@ -87,6 +88,8 @@ def _normalize_segment(src: Path, dest: Path, seconds: float, fps: int, idx: int
             f"crop={width}:{height},setsar=1,fps={fps}"
         )
         args = []
+        if source_start:
+            args.extend(["-ss", f"{source_start:.6f}"])
         if loop_video:
             args.extend(["-stream_loop", "-1"])
         args.extend([
@@ -200,7 +203,8 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
                         image_motion: bool = True,
                         transition: str = "hard_cut",
                         export_preset: str = "legacy",
-                        aspect_ratio: str = "9:16") -> tuple[Path, float]:
+                        aspect_ratio: str = "9:16",
+                        source_starts: Optional[list[float]] = None) -> tuple[Path, float]:
     """Assemble ordered project media into a silent video without pipeline services."""
     profile = get_output_profile(aspect_ratio)
     if not clips:
@@ -223,20 +227,29 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
                 for duration in requested_durations
             )):
         raise ValueError("Scene durations must match the clips and be between 0 and 600 seconds")
+    source_offsets = source_starts if source_starts is not None else [0.0] * len(clips)
+    if (len(source_offsets) != len(clips)
+            or any(
+                isinstance(offset, bool) or not isinstance(offset, (int, float))
+                or not math.isfinite(offset) or offset < 0
+                for offset in source_offsets
+            )):
+        raise ValueError("Source offsets must match the clips and be non-negative")
     if sum(requested_durations) > 600:
         raise ValueError("Total render duration exceeds the 600-second limit")
     durations = (
         [math.ceil(duration * fps - 1e-9) / fps for duration in requested_durations]
         if scene_durations is not None else requested_durations
     )
-    for src, duration in zip(clips, durations):
+    for src, duration, source_start in zip(clips, durations, source_offsets):
         if src.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
             available = ffprobe_duration(src)
-            if duration > available + 1e-6:
-                uncovered = duration - available
+            if source_start + duration > available + 1e-6:
+                uncovered = source_start + duration - available
                 raise ValueError(
                     f"Video {src.name} is {available:.2f}s but its shot needs "
-                    f"{duration:.2f}s; {uncovered:.2f}s of visual coverage is "
+                    f"{duration:.2f}s from source offset {source_start:.2f}s; "
+                    f"{uncovered:.2f}s of visual coverage is "
                     "uncovered. Assign more footage or shorten the scene."
                 )
     if any(duration > 600 for duration in durations):
@@ -263,12 +276,14 @@ def assemble_media_only(clips: list[Path], out_dir: Path, fps: int,
     seg_dir = out_dir / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     segments = []
-    for index, (src, duration) in enumerate(zip(clips, durations)):
+    for index, (src, duration, source_start) in enumerate(
+        zip(clips, durations, source_offsets)
+    ):
         segment = seg_dir / f"seg{index:04d}.mp4"
         _normalize_segment(
             src, segment, duration, fps, index, image_motion,
             segment_encoding if export_preset != "legacy" else None,
-            profile.aspect_ratio, loop_video=False,
+            profile.aspect_ratio, loop_video=False, source_start=source_start,
         )
         expected_frames = round(duration * fps)
         actual_frames = _video_frame_count(segment)

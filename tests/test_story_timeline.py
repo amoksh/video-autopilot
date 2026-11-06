@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from src.assemble import _normalize_segment, assemble_media_only
 from src.captions import build_scene_captions
@@ -110,6 +111,213 @@ def _make_split_mp4(path: Path) -> None:
 
 
 class StoryTimelineIntegrationTest(unittest.TestCase):
+    def test_project_source_ranges_reject_overlap_and_use_free_video_segments(self):
+        project_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            project_dir = projects_dir / project_id
+            project_dir.mkdir(parents=True)
+            video_path = project_dir / "eight-seconds.mp4"
+            _make_duration_mp4(video_path, "blue", 8)
+            media_id = uuid.uuid4().hex
+            media = [{
+                "id": media_id, "name": video_path.name, "extension": ".mp4",
+                "file": video_path.name, "size": video_path.stat().st_size,
+                "technical_metadata": {"duration_seconds": 8.0},
+            }]
+            overlapping = [
+                {
+                    "id": uuid.uuid4().hex, "duration": 5.0,
+                    "shots": [{
+                        "media_id": media_id, "start": 0, "duration": 5,
+                        "source_start": 0, "source_start_auto": False,
+                    }],
+                },
+                {
+                    "id": uuid.uuid4().hex, "duration": 5.0,
+                    "shots": [{
+                        "media_id": media_id, "start": 0, "duration": 5,
+                        "source_start": 0, "source_start_auto": False,
+                    }],
+                },
+            ]
+            with patch.object(server, "STUDIO_PROJECTS", projects_dir):
+                with self.assertRaises(HTTPException) as overlap:
+                    server._studio_source_assignments(
+                        overlapping, media, [video_path],
+                    )
+                self.assertEqual(overlap.exception.status_code, 400)
+                self.assertIn("overlapping footage", overlap.exception.detail)
+                overlapping[1]["allow_reuse"] = True
+                approved_reuse = server._studio_source_assignments(
+                    overlapping, media, [video_path],
+                )
+                self.assertEqual(approved_reuse[1][0]["source_start"], 0)
+
+                unused = [
+                    {
+                        "id": uuid.uuid4().hex, "duration": 4.0,
+                        "shots": [{
+                            "media_id": media_id, "start": 0, "duration": 4,
+                            "source_start": None, "source_start_auto": True,
+                        }],
+                    },
+                    {
+                        "id": uuid.uuid4().hex, "duration": 4.0,
+                        "shots": [{
+                            "media_id": media_id, "start": 0, "duration": 4,
+                            "source_start": None, "source_start_auto": True,
+                        }],
+                    },
+                ]
+                assigned = server._studio_source_assignments(
+                    unused, media, [video_path],
+                )
+                self.assertEqual(
+                    [group[0]["source_start"] for group in assigned],
+                    [0.0, 4.0],
+                )
+
+    def test_static_image_reuse_requires_explicit_scene_override(self):
+        image_id = uuid.uuid4().hex
+        media = [{
+            "id": image_id, "name": "still.png", "extension": ".png",
+            "file": "still.png", "size": 1,
+        }]
+        scenes = [
+            {"id": uuid.uuid4().hex, "media_id": image_id, "duration": 2.0},
+            {"id": uuid.uuid4().hex, "media_id": image_id, "duration": 2.0},
+        ]
+        with self.assertRaises(HTTPException) as reused:
+            server._studio_source_assignments(
+                scenes, media, [Path("still.png")],
+            )
+        self.assertIn("already used", reused.exception.detail)
+
+        scenes[1]["allow_reuse"] = True
+        assigned = server._studio_source_assignments(
+            scenes, media, [Path("still.png")],
+        )
+        self.assertEqual(assigned[1][0]["source_start"], 0)
+        self.assertTrue(assigned[1][0]["allow_reuse"])
+
+    def test_video_source_offset_is_used_when_normalizing_shot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "red-then-blue.mp4"
+            output = directory / "second-half.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=red:s=64x64:r=12:d=4",
+                    "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=12:d=4",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                    "-map", "[v]", "-an", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(source),
+                ],
+                check=True, capture_output=True,
+            )
+            _normalize_segment(
+                source, output, 1, 12, 0,
+                image_motion=False, source_start=5,
+            )
+            rgb = subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-i", str(output),
+                    "-frames:v", "1", "-vf", "scale=1:1,format=rgb24",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                ],
+                check=True, capture_output=True,
+            ).stdout
+            self.assertEqual(len(rgb), 3)
+            self.assertGreater(rgb[2], rgb[0])
+
+    def test_shot_durations_must_cover_narration_scene_exactly(self):
+        project_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            project_dir = projects_dir / project_id
+            project_dir.mkdir(parents=True)
+            image_path = project_dir / "still.png"
+            _write_solid_png(image_path, (20, 40, 80))
+            media_id = uuid.uuid4().hex
+            media = [{
+                "id": media_id, "name": image_path.name, "extension": ".png",
+                "file": image_path.name, "size": image_path.stat().st_size,
+            }]
+            scene = {
+                "id": uuid.uuid4().hex, "media_id": media_id, "duration": 4,
+                "allow_reuse": True,
+                "shots": [
+                    {"media_id": media_id, "start": 0, "duration": 2.5},
+                    {"media_id": media_id, "start": 2.5, "duration": 2.5},
+                ],
+            }
+            with self.assertRaises(HTTPException) as timing:
+                server._studio_scene_shot_groups(
+                    [scene], media, [image_path], 12,
+                )
+            self.assertIn("shots exceed the scene by 1.00s", timing.exception.detail)
+
+    def test_story_save_routes_valid_and_invalid_project_ids_and_reloads_shots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            with (
+                patch.object(server, "STUDIO_PROJECTS", projects_dir),
+                TestClient(server.app) as client,
+            ):
+                created = client.post(
+                    "/api/studio/projects", json={"name": "Save reliability"},
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                project_id = created.json()["id"]
+                invalid = client.put(
+                    f"/api/studio/projects/{uuid.uuid4().hex}/story",
+                    json={"script": "A story.", "scenes": []},
+                )
+                self.assertEqual(invalid.status_code, 404, invalid.text)
+                self.assertEqual(invalid.json()["detail"], "project not found")
+
+                project_dir = projects_dir / project_id
+                media_id = uuid.uuid4().hex
+                video_path = project_dir / f"{media_id}.mp4"
+                _make_duration_mp4(video_path, "green", 8)
+                manifest = server._studio_manifest(project_id)
+                manifest["media"] = [{
+                    "id": media_id, "name": "clip.mp4", "extension": ".mp4",
+                    "size": video_path.stat().st_size, "file": video_path.name,
+                    "technical_metadata": {"duration_seconds": 8.0},
+                }]
+                server._save_studio_manifest(project_id, manifest)
+                scene_id = uuid.uuid4().hex
+                saved = client.put(
+                    f"/api/studio/projects/{project_id}/story",
+                    json={
+                        "script": "Two sequential shots.",
+                        "scenes": [{
+                            "id": scene_id, "text": "Two sequential shots.",
+                            "media_id": media_id, "duration": 4,
+                            "shots": [
+                                {"media_id": media_id, "start": 0, "duration": 2},
+                                {"media_id": media_id, "start": 2, "duration": 2},
+                            ],
+                            "approved": True,
+                        }],
+                    },
+                )
+                self.assertEqual(saved.status_code, 200, saved.text)
+                reloaded = client.get(
+                    f"/api/studio/projects/{project_id}",
+                )
+                self.assertEqual(reloaded.status_code, 200, reloaded.text)
+                shots = reloaded.json()["scenes"][0]["shots"]
+                self.assertEqual([shot["source_start"] for shot in shots], [0, 2])
+                self.assertEqual(
+                    [usage["source_start"] for usage in
+                     server._studio_manifest(project_id)["media_usage"]],
+                    [0, 2],
+                )
+
     def test_short_video_is_rejected_before_render_and_explicit_shots_cover_scene(self):
         project_id = uuid.uuid4().hex
         with tempfile.TemporaryDirectory() as temporary:

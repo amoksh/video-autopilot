@@ -55,7 +55,10 @@ def _project(directory: Path, project_id: str, scenes: list[dict],
         "media": [media],
         "story_script": "\n".join(scene["text"] for scene in scenes),
         "scenes": [
-            {"id": uuid.uuid4().hex, "media_id": media_id, **scene}
+            {
+                "id": uuid.uuid4().hex, "media_id": media_id,
+                "allow_reuse": True, **scene,
+            }
             for scene in scenes
         ],
         "audio_settings": audio_settings,
@@ -453,6 +456,76 @@ class StudioAudioTest(unittest.TestCase):
                 self.assertEqual(job.scene_timings[0]["start"], 0)
                 self.assertEqual(job.scene_timings[0]["end"], 1.0)
             server.STUDIO_RENDER_JOBS.pop(result["id"], None)
+
+    def test_long_narration_reports_missing_unique_video_seconds(self):
+        project_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as temporary:
+            projects_dir = Path(temporary) / "projects"
+            project_dir = projects_dir / project_id
+            project_dir.mkdir(parents=True)
+            media_id = uuid.uuid4().hex
+            video_path = project_dir / f"{media_id}.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=12:d=1",
+                    "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    str(video_path),
+                ],
+                check=True, capture_output=True,
+            )
+            manifest = {
+                "id": project_id,
+                "name": "Narration coverage",
+                "created": "2026-01-01T00:00:00",
+                "media": [{
+                    "id": media_id, "name": video_path.name,
+                    "extension": ".mp4", "file": video_path.name,
+                    "size": video_path.stat().st_size,
+                    "technical_metadata": {"duration_seconds": 1.0},
+                }],
+                "story_script": "A longer narration.",
+                "scenes": [{
+                    "id": uuid.uuid4().hex, "text": "A longer narration.",
+                    "media_id": media_id, "duration": 0.5,
+                    "approved": True, "reviewed_media_id": media_id,
+                }],
+                "audio_settings": {
+                    "voiceover_enabled": True, "captions_enabled": False,
+                    "voice": "en-US-AriaNeural", "speech_buffer": 0.5,
+                },
+            }
+            (project_dir / "project.json").write_text(
+                json.dumps(manifest), encoding="utf-8",
+            )
+
+            def synthetic_voice(_cfg: dict, _text: str, out_dir: Path) -> Path:
+                audio = out_dir / "synthetic.wav"
+                run_ffmpeg([
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=0.8",
+                    "-c:a", "pcm_s16le", str(audio),
+                ])
+                return audio
+
+            with (
+                patch.object(server, "STUDIO_PROJECTS", projects_dir),
+                patch.object(server, "synthesize", side_effect=synthetic_voice),
+            ):
+                result = server.render_studio_project(
+                    project_id, server.StudioRenderReq(fps=12),
+                )
+                job = server.STUDIO_RENDER_JOBS[result["id"]]
+                deadline = time.monotonic() + 30
+                while job.status in ("queued", "running") and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(job.status, "failed")
+                self.assertIn("unique footage missing", job.error)
+                self.assertIn("Scene 1, shot 1", job.error)
+                self.assertIn("0.33s", job.error)
+                self.assertFalse(
+                    (project_dir / "exports" / result["id"] / "final.mp4").exists()
+                )
+                server.STUDIO_RENDER_JOBS.pop(result["id"], None)
 
     def test_two_scene_audio_caption_export_and_export_apis(self):
         project_id = uuid.uuid4().hex

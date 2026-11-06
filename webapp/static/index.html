@@ -19,7 +19,11 @@
     <nav class="sidebar-nav">
       <a class="nav-item active" data-view="studio">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M9 5v14M15 5v14M4 10h5m6 0h5M4 15h5m6 0h5"/></svg>
-        <span>Studio</span>
+        <span>Simple Studio</span>
+      </a>
+      <a class="nav-item" data-view="studio-advanced">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 12h8M8 15h5"/></svg>
+        <span>Advanced Studio</span>
       </a>
       <a class="nav-item" data-view="dashboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
@@ -58,24 +62,57 @@
       <div class="page-header studio-header">
         <div>
           <div class="studio-eyebrow"><span class="live-dot"></span> PRIVATE WORKSPACE</div>
-          <h1>Video Autopilot Studio</h1>
-          <p class="page-sub">Bring your media together. Preview, organize, and download your finished videos.</p>
+          <h1 id="studioTitle">Simple Studio</h1>
+          <p class="page-sub" id="studioSubtitle">A focused workspace for your daily video production.</p>
         </div>
         <span class="studio-local-badge">Stored locally</span>
       </div>
 
       <div class="studio-projectbar card">
-        <div class="project-heading">
-          <div class="studio-kicker">WORKSPACE</div>
-          <h2>New Project</h2>
-        </div>
-        <label class="sr-only" for="projectName">Project name</label>
-        <input id="projectName" class="studio-input" maxlength="80" placeholder="Give your project a name" autocomplete="off"/>
-        <button class="btn-primary" id="createProjectBtn">Create project</button>
         <label class="studio-project-select-label" for="projectSelect">Open project</label>
         <select id="projectSelect" class="select-sm" aria-label="Select project">
           <option value="">No projects yet</option>
         </select>
+        <label class="sr-only" for="projectName">New project name</label>
+        <input id="projectName" class="studio-input" maxlength="80" placeholder="New project name" autocomplete="off"/>
+        <button class="btn-primary" id="createProjectBtn">Create project</button>
+      </div>
+
+      <section class="studio-simple-home" id="studioSimpleHome" aria-label="Simple Studio actions">
+        <div class="studio-simple-intro">
+          <div>
+            <div class="studio-kicker">YOUR VIDEO WORKFLOW</div>
+            <h2>What would you like to do?</h2>
+          </div>
+          <div class="studio-simple-actions">
+            <button type="button" class="studio-action" data-studio-workspace="upload"><span>01</span>Upload Media</button>
+            <button type="button" class="studio-action" data-studio-workspace="story"><span>02</span>Story &amp; Script</button>
+            <button type="button" class="studio-action" data-studio-workspace="create"><span>03</span>Create Video</button>
+            <button type="button" class="studio-action" data-studio-workspace="preview"><span>04</span>Preview &amp; Correct</button>
+            <button type="button" class="studio-action" data-studio-workspace="download"><span>05</span>Download MP4</button>
+          </div>
+        </div>
+        <div class="studio-simple-summary">
+          <section class="studio-simple-status">
+            <div class="studio-kicker">RENDER STATUS</div>
+            <p id="studioSimpleStatus" data-status="idle">Idle</p>
+            <p class="studio-simple-detail" id="studioSimpleMessage"></p>
+            <p class="studio-simple-warning" id="studioSimpleWarning" role="status"></p>
+          </section>
+          <section class="studio-simple-video">
+            <div class="studio-kicker">SELECTED VIDEO</div>
+            <p id="studioSimpleVideo">No completed MP4 selected.</p>
+          </section>
+        </div>
+        <p class="studio-simple-empty" id="studioSimpleEmpty">No project selected. Choose an existing project or create one above to get started.</p>
+      </section>
+
+      <div class="studio-workspace-heading" id="studioWorkspaceHeading" hidden>
+        <div>
+          <div class="studio-kicker">PROJECT WORKSPACE</div>
+          <h2 id="studioWorkspaceTitle">Upload Media</h2>
+        </div>
+        <button type="button" class="btn-ghost btn-sm" id="studioWorkspaceBack">Back to Simple Studio</button>
       </div>
 
       <div class="studio-layout">
@@ -246,18 +283,19 @@
         <aside class="studio-side-column">
           <section class="card studio-preview-card">
             <div class="card-head">
-              <div><div class="studio-kicker">03 / PREVIEW</div><h3>Video preview</h3></div>
+              <div><div class="studio-kicker">04 / PREVIEW</div><h3>Video preview</h3></div>
               <span class="preview-dot">READY</span>
             </div>
             <div class="studio-preview-stage" id="studioPreviewStage">
               <div class="studio-preview-empty"><span class="preview-play">▶</span><p>Select an uploaded clip or a finished video to preview.</p></div>
             </div>
             <div class="studio-preview-caption" id="previewCaption">Nothing selected</div>
+            <button type="button" class="btn-ghost btn-sm studio-preview-edit" id="studioPreviewEditStory">Edit Story &amp; Script</button>
           </section>
 
           <section class="card studio-export-card">
             <div class="card-head">
-              <div><div class="studio-kicker">04 / FINISHED VIDEOS</div><h3>Export &amp; download</h3></div>
+              <div><div class="studio-kicker">05 / FINISHED VIDEOS</div><h3>Export &amp; download</h3></div>
             </div>
             <label class="sr-only" for="exportSelect">Select a finished video</label>
             <select id="exportSelect" class="select-sm studio-export-select">
